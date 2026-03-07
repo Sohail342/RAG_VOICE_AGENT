@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 
+.ruff_cache/
 # Virtual environments
 .env
 .venv
@@ -35,9 +36,14 @@ venv.bak/
 *.swp
 *.swo
 
+.mypy_cache/
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Ignore large ML models
+app/ml_models/*.keras
 
 # Database
 *.db
@@ -68,10 +74,11 @@ celerybeat.pid
 .env.prod
 .env.dev
 
-# ruff cache
-__ruff_cache__/
-.ruff_cache/
+.ruff_cache
+.mypy_cache
+__pypackages__/
 
-# Ollama models
-app/llm/model/
 
+# onnx files
+app/ml_models/*.onnx
+app/ml_models/*.json

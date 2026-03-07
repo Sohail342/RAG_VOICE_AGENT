@@ -26,8 +26,17 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    ffmpeg \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m appuser
+
+# Download Piper TTS default model (to ensure self-contained fallback)
+RUN mkdir -p /app/models \
+    && wget -q -O /app/models/en_US-lessac-medium.onnx "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx?download=true" \
+    && wget -q -O /app/models/en_US-lessac-medium.onnx.json "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json?download=true" \
+    && chown -R appuser:appuser /app/models
 
 #  copy uv binaries from builder stage
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/

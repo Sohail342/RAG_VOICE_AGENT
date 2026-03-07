@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: Optional[EmailStr] = "noreply@example.com"
     EMAILS_FROM_NAME: Optional[str] = "RAG_VOICE_AGENT"
 
-    FIRST_SUPERUSER: EmailStr = "admin@example.com"
-    FIRST_SUPERUSER_PASSWORD: str = "admin"
+    # Ollama Configuration
+    OLLAMA_API_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.2:3b"
 
     model_config = {
         "env_file": ".env",

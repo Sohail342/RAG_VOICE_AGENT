@@ -1,0 +1,732 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { LogOut, MessageSquare, Settings, Menu, Home, Volume2, Phone } from 'lucide-react';
+
+interface VoiceAgentProps {
+    onLogout: () => void;
+}
+
+type SessionState = "INACTIVE" | "LISTENING" | "THINKING" | "SPEAKING";
+
+export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
+    const [sessionState, setSessionState] = useState<SessionState>("INACTIVE");
+    const [statusText, setStatusText] = useState("Tap microphone to start session");
+    const [volumeLevel, setVolumeLevel] = useState(0);
+    const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+    const [callSeconds, setCallSeconds] = useState(0);
+    const [viewMode, setViewMode] = useState<'voice' | 'chat'>('voice');
+
+    // Chat State
+    const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
+    const [chatInput, setChatInput] = useState("");
+    const [isTyping, setIsTyping] = useState(false);
+    const chatEndRef = useRef<HTMLDivElement>(null);
+
+    const scrollToBottom = () => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+
+    useEffect(() => {
+        if (viewMode === 'chat') scrollToBottom();
+    }, [chatMessages, viewMode]);
+
+    const sessionStateRef = useRef<SessionState>("INACTIVE");
+    useEffect(() => {
+        sessionStateRef.current = sessionState;
+    }, [sessionState]);
+
+    const socketRef = useRef<WebSocket | null>(null);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const audioQueueRef = useRef<AudioBuffer[]>([]);
+
+    // VAD Refs
+    const analyserRef = useRef<AnalyserNode | null>(null);
+    const silenceTimeoutRef = useRef<number | null>(null);
+    const pollingIntervalRef = useRef<number | null>(null);
+    const noSpeechTimeoutRef = useRef<any>(null); // Allow any for NodeJs.Timeout/number compat
+
+    // Playback debounce ref
+    const doneSpeakingTimeoutRef = useRef<number | null>(null);
+    const isPlayingRef = useRef<boolean>(false);
+    const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+    // SILENCE THRESHOLDS
+    const SILENCE_THRESHOLD = 100; // Increased to ignore ambient room noise without AGC amplification
+    const BARGE_IN_THRESHOLD = 180; // High threshold required to interrupt the agent.
+    const SILENCE_DURATION_MS = 1500;
+
+    useEffect(() => {
+        let interval: any = null;
+        if (sessionState !== "INACTIVE") {
+            interval = setInterval(() => {
+                setCallSeconds(prev => prev + 1);
+            }, 1000);
+        } else {
+            setCallSeconds(0);
+        }
+        return () => {
+            if (interval) clearInterval(interval);
+        };
+    }, [sessionState]);
+
+    const formatTime = (seconds: number) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    useEffect(() => {
+        return () => {
+            disconnect();
+        }
+    }, []);
+
+    const initAudioContext = () => {
+        if (!audioContextRef.current) {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        if (audioContextRef.current.state === 'suspended') {
+            audioContextRef.current.resume();
+        }
+    };
+
+    const cleanupVADIntervals = () => {
+        if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
+        if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
+        if (noSpeechTimeoutRef.current) clearTimeout(noSpeechTimeoutRef.current);
+        pollingIntervalRef.current = null;
+        silenceTimeoutRef.current = null;
+        noSpeechTimeoutRef.current = null;
+    };
+
+    const cleanupAudioTracks = () => {
+        cleanupVADIntervals();
+        if (doneSpeakingTimeoutRef.current) clearTimeout(doneSpeakingTimeoutRef.current);
+
+        if (analyserRef.current) {
+            analyserRef.current.disconnect();
+            analyserRef.current = null;
+        }
+        if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+            mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+        }
+        audioQueueRef.current = [];
+        if (activeSourceRef.current) {
+            try { activeSourceRef.current.stop(); } catch (e) { }
+            activeSourceRef.current = null;
+        }
+        isPlayingRef.current = false;
+    };
+
+    const playNextInQueue = useCallback(() => {
+        if (!audioContextRef.current) return;
+
+        if (doneSpeakingTimeoutRef.current) {
+            clearTimeout(doneSpeakingTimeoutRef.current);
+            doneSpeakingTimeoutRef.current = null;
+        }
+
+        if (audioQueueRef.current.length === 0) {
+            isPlayingRef.current = false;
+            doneSpeakingTimeoutRef.current = setTimeout(() => {
+                if (sessionStateRef.current === "SPEAKING") {
+                    handleAgentFinishedSpeaking();
+                }
+            }, 800);
+            return;
+        }
+
+        isPlayingRef.current = true;
+        const currentBuffer = audioQueueRef.current.shift()!;
+        const source = audioContextRef.current.createBufferSource();
+        source.buffer = currentBuffer;
+        source.connect(audioContextRef.current.destination);
+        activeSourceRef.current = source;
+
+        source.onended = () => {
+            activeSourceRef.current = null;
+            playNextInQueue();
+        };
+
+        source.start(0);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const sendChatMessage = async () => {
+        if (!chatInput.trim() || isTyping) return;
+
+        const userMsg = chatInput;
+        setChatInput("");
+        setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+        setIsTyping(true);
+
+        try {
+            const response = await fetch('/api/v1/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: userMsg }),
+            });
+
+            if (!response.body) return;
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let assistantMsg = "";
+
+            setChatMessages(prev => [...prev, { role: 'assistant', content: "" }]);
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value, { stream: true });
+                assistantMsg += chunk;
+
+                setChatMessages(prev => {
+                    const newMsgs = [...prev];
+                    newMsgs[newMsgs.length - 1].content = assistantMsg;
+                    return newMsgs;
+                });
+            }
+        } catch (err) {
+            console.error("Chat error:", err);
+        } finally {
+            setIsTyping(false);
+        }
+    };
+
+    const connectAndWaitForSocket = (): Promise<void> => {
+        return new Promise((resolve, reject) => {
+            if (socketRef.current?.readyState === WebSocket.OPEN) {
+                resolve();
+                return;
+            }
+
+            initAudioContext();
+            setStatusText("Connecting...");
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice`;
+            const ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                console.log("WebSocket connected successfully!");
+                resolve();
+            };
+
+            ws.onmessage = async (event) => {
+                // If user interrupted and is now listening, discard leftover agent thoughts
+                if (sessionStateRef.current === "LISTENING") {
+                    console.log("Ignored stale TTS chunk due to barge-in.");
+                    return;
+                }
+
+                setSessionState("SPEAKING");
+                setStatusText("Agent speaks...");
+
+                const arrayBuffer = event.data;
+                if (!audioContextRef.current) return;
+
+                try {
+                    const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+                    audioQueueRef.current.push(audioBuffer);
+
+                    if (!isPlayingRef.current) {
+                        playNextInQueue();
+                    }
+                } catch (err) {
+                    console.error("Error decoding TTS audio:", err);
+                }
+            };
+
+            ws.onclose = () => {
+                setSessionState("INACTIVE");
+                cleanupAudioTracks();
+                setStatusText("Tap microphone to start session");
+            };
+
+            ws.onerror = (error) => {
+                setSessionState("INACTIVE");
+                setStatusText("Connection Error");
+                reject(error);
+            };
+
+            socketRef.current = ws;
+        });
+    };
+
+    const disconnect = () => {
+        if (socketRef.current) {
+            socketRef.current.close();
+            socketRef.current = null;
+        }
+        cleanupAudioTracks();
+        setSessionState("INACTIVE");
+        setStatusText("Tap microphone to start session");
+    };
+
+    const handleAgentFinishedSpeaking = () => {
+        console.log("Agent finished speaking. Auto-restarting microphone for next turn.");
+        setTimeout(() => {
+            if (sessionStateRef.current !== "INACTIVE") {
+                startListeningTurn();
+            }
+        }, 500);
+    };
+
+    const interruptAgent = () => {
+        console.log("User interrupted agent! (Barge-in detected)");
+        audioQueueRef.current = [];
+        if (activeSourceRef.current) {
+            try {
+                activeSourceRef.current.onended = null;
+                activeSourceRef.current.stop();
+            } catch (e) { }
+            activeSourceRef.current = null;
+        }
+        isPlayingRef.current = false;
+
+        if (doneSpeakingTimeoutRef.current) {
+            clearTimeout(doneSpeakingTimeoutRef.current);
+            doneSpeakingTimeoutRef.current = null;
+        }
+
+        // Interrupt forces immediate jump to listening mode
+        startListeningTurn();
+    };
+
+    useEffect(() => {
+        // Run VAD during LISTENING, and ALSO during SPEAKING to detect interruptions!
+        if (sessionState !== "LISTENING" && sessionState !== "SPEAKING") {
+            cleanupVADIntervals();
+            setVolumeLevel(0);
+            return;
+        }
+
+        let hasSpoken = false;
+
+        const checkVolume = () => {
+            if (!analyserRef.current) return;
+            // Only require recording state if we are LISTENING. 
+            // If SPEAKING, we only monitor volume (since we already have a live track from MediaRecorder)
+            if (sessionState === "LISTENING" && mediaRecorderRef.current?.state !== "recording") return;
+
+            const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+            analyserRef.current.getByteFrequencyData(dataArray);
+
+            const maxVolume = Math.max(...dataArray);
+            setVolumeLevel(maxVolume);
+
+            if (sessionState === "SPEAKING") {
+                // If agent is speaking, ONLY loud intentional human speech (barge-in threshold) can interrupt
+                if (maxVolume > BARGE_IN_THRESHOLD) {
+                    interruptAgent();
+                }
+                return; // Do not process standard silence tracking while agent speaks
+            }
+
+            // Standard LISTENING state volume check
+            if (maxVolume > SILENCE_THRESHOLD) {
+                hasSpoken = true;
+                setStatusText("Listening...");
+                if (silenceTimeoutRef.current) {
+                    clearTimeout(silenceTimeoutRef.current);
+                    silenceTimeoutRef.current = null;
+                }
+                if (noSpeechTimeoutRef.current) {
+                    clearTimeout(noSpeechTimeoutRef.current);
+                    noSpeechTimeoutRef.current = null;
+                }
+            } else if (hasSpoken && sessionState === "LISTENING") {
+                if (!silenceTimeoutRef.current) {
+                    silenceTimeoutRef.current = setTimeout(() => {
+                        console.log("Silence detected. Emitting audio chunk to LLM.");
+                        if (mediaRecorderRef.current?.state === "recording") {
+                            mediaRecorderRef.current.stop();
+                        }
+                    }, SILENCE_DURATION_MS);
+                }
+            } else if (!hasSpoken && sessionState === "LISTENING") {
+                // The user hasn't spoken yet. Ensure there is a timeout to prevent infinite listening.
+                if (!noSpeechTimeoutRef.current) {
+                    noSpeechTimeoutRef.current = setTimeout(() => {
+                        console.log("No speech detected for 3 seconds. Progressing conversation.");
+                        if (mediaRecorderRef.current?.state === "recording") {
+                            mediaRecorderRef.current.stop();
+                        }
+                    }, 3000); // 3 seconds absolute cutoff if no sound detected
+                }
+            }
+        };
+
+        pollingIntervalRef.current = setInterval(checkVolume, 50);
+
+        return () => cleanupVADIntervals();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sessionState]);
+
+    const startListeningTurn = async () => {
+        cleanupVADIntervals();
+
+        try {
+            await connectAndWaitForSocket();
+
+            if (!mediaRecorderRef.current || !mediaRecorderRef.current.stream.active) {
+                return;
+            }
+
+            const mr = mediaRecorderRef.current;
+            const localChunks: Blob[] = [];
+
+            // Override handlers to ensure fresh closure scope
+            mr.ondataavailable = (e) => {
+                if (e.data.size > 0) {
+                    localChunks.push(e.data);
+                }
+            };
+
+            mr.onstop = () => {
+                const completeBlob = new Blob(localChunks, { type: mr.mimeType });
+                console.log(`User turn complete. Blob: ${completeBlob.size} bytes`);
+
+                if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                    socketRef.current.send(completeBlob);
+                    setSessionState("THINKING");
+                    setStatusText("Agent thinking...");
+                } else {
+                    setSessionState("INACTIVE");
+                    setStatusText("Connection lost.");
+                }
+            };
+
+            if (mr.state === "inactive") {
+                mr.start();
+                setSessionState("LISTENING");
+                setStatusText("Listening...");
+            }
+
+        } catch (err) {
+            console.error(err);
+        }
+    };
+
+    const toggleSession = async () => {
+        if (sessionState === "INACTIVE") {
+            try {
+                setStatusText("Connecting...");
+
+                // IMPORTANT: Request optimized STT parameters (16kHz, Echo Cancellation, Noise Suppression)
+                if (!mediaRecorderRef.current || !mediaRecorderRef.current.stream.active) {
+                    setStatusText("Accessing microphone...");
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            // autoGainControl is false because it artifically amplifies silence, breaking our volume-based VAD thresholds
+                            autoGainControl: false,
+                            sampleRate: 16000
+                        }
+                    });
+
+                    initAudioContext();
+
+                    if (audioContextRef.current) {
+                        const source = audioContextRef.current.createMediaStreamSource(stream);
+                        const analyser = audioContextRef.current.createAnalyser();
+                        analyser.fftSize = 256;
+                        source.connect(analyser);
+                        analyserRef.current = analyser;
+                    }
+                    mediaRecorderRef.current = new MediaRecorder(stream);
+                }
+
+                setViewMode('voice'); // Ensure we are in voice view when calling
+                // Triggers WebSocket open -> `voice.py` sends `generate_greeting` LLM payload -> we get `SPEAKING`.
+                await connectAndWaitForSocket();
+                setStatusText("Waking agent up...");
+            } catch (err) {
+                console.error("Microphone access error:", err);
+                setStatusText("Microphone permission denied.");
+                setSessionState("INACTIVE");
+            }
+        } else {
+            disconnect();
+        }
+    };
+
+    return (
+        <div className="min-h-screen flex bg-[#f4f4f4] relative overflow-hidden font-sans">
+
+            {/* Collapsible Sidebar */}
+            <aside
+                className={`relative z-20 flex flex-col bg-white border-r border-slate-200/60 transition-all duration-500 ease-in-out shadow-[4px_0_24px_rgba(0,0,0,0.02)] overflow-x-hidden ${isSidebarOpen ? 'w-72' : 'w-20'}`}
+            >
+                {/* Sidebar Header - Enhanced Logo Integration */}
+                <div className="h-24 flex items-center justify-between px-5 relative">
+                    <div className={`flex items-center gap-3 transition-all duration-500 ${isSidebarOpen ? 'opacity-100 translate-x-0' : 'opacity-100 translate-x-0 mx-auto'}`}>
+                        <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-lg shadow-blue-500/20 group-hover:scale-105 transition-transform">
+                            <img src="/logo-removebg.png" alt="Logo" className="w-7 h-7 object-contain brightness-0 invert" />
+                        </div>
+                        {isSidebarOpen && (
+                            <div className="flex flex-col animate-fade-in">
+                                <span className="font-extrabold text-slate-900 leading-none tracking-tight text-lg">Indus AI</span>
+                                <span className="text-[10px] text-blue-600 font-bold uppercase tracking-widest mt-1">Voice Agent</span>
+                            </div>
+                        )}
+                    </div>
+                    {isSidebarOpen && (
+                        <button
+                            onClick={() => setIsSidebarOpen(false)}
+                            className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
+                        >
+                            <Menu className="w-5 h-5" />
+                        </button>
+                    )}
+                    {!isSidebarOpen && (
+                        <button
+                            onClick={() => setIsSidebarOpen(true)}
+                            className="absolute -right-3 top-9 w-6 h-6 bg-white border border-slate-200 rounded-full flex items-center justify-center text-slate-400 hover:text-blue-600 shadow-sm z-30 transition-all hover:scale-110"
+                        >
+                            <Menu className="w-3 h-3" />
+                        </button>
+                    )}
+                </div>
+
+                {/* Sidebar Navigation - Modern Sectioned Layout */}
+                <nav className="flex-1 py-8 px-4 flex flex-col gap-8 overflow-y-auto overflow-x-hidden scrollbar-hide">
+
+                    {/* General Section */}
+                    <div className="flex flex-col gap-2">
+                        {isSidebarOpen && <span className="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-2">Main Menu</span>}
+                        <button
+                            onClick={() => setViewMode('voice')}
+                            className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 group relative
+                            ${viewMode === 'voice' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}
+                        `}
+                        >
+                            <Home className={`w-5 h-5 shrink-0 ${viewMode === 'voice' ? 'text-white' : 'group-hover:scale-110 transition-transform'}`} />
+                            {isSidebarOpen && <span className="font-semibold text-sm">Voice Interface</span>}
+                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Voice Interface</span>}
+                        </button>
+
+                        <button
+                            onClick={() => setViewMode('chat')}
+                            className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 group relative
+                            ${viewMode === 'chat' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}
+                        `}
+                        >
+                            <MessageSquare className={`w-5 h-5 shrink-0 ${viewMode === 'chat' ? 'text-white' : 'group-hover:scale-110 transition-transform'}`} />
+                            {isSidebarOpen && <span className="font-semibold text-sm">Text Messenger</span>}
+                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Text Messenger</span>}
+                        </button>
+                    </div>
+
+                    {/* Preferences Section */}
+                    <div className="flex flex-col gap-2">
+                        {isSidebarOpen && <span className="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-2">Configuration</span>}
+                        <button className="flex items-center gap-4 px-4 py-3 text-slate-500 hover:text-slate-900 hover:bg-slate-50 rounded-2xl transition-all group relative">
+                            <Volume2 className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
+                            {isSidebarOpen && <span className="font-medium text-sm">Audio Settings</span>}
+                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Audio Settings</span>}
+                        </button>
+                        <button className="flex items-center gap-4 px-4 py-3 text-slate-500 hover:text-slate-900 hover:bg-slate-50 rounded-2xl transition-all group relative">
+                            <Settings className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
+                            {isSidebarOpen && <span className="font-medium text-sm">Global Settings</span>}
+                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Global Settings</span>}
+                        </button>
+                    </div>
+                </nav>
+
+                {/* Sidebar Footer - Premium Logout */}
+                <div className="p-4 border-t border-slate-50 bg-slate-50/30 overflow-hidden">
+                    <button
+                        onClick={() => {
+                            disconnect();
+                            onLogout();
+                        }}
+                        className={`flex items-center gap-4 px-4 py-3 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-2xl transition-all w-full group relative
+                        ${!isSidebarOpen && 'justify-center'}
+                    `}
+                    >
+                        <LogOut className="w-5 h-5 shrink-0 transition-transform group-hover:-translate-x-1" />
+                        {isSidebarOpen && <span className="font-bold text-sm">Terminate Session</span>}
+                        {!isSidebarOpen && <span className="absolute left-16 bg-red-600 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all font-bold">Sign Out</span>}
+                    </button>
+                </div>
+            </aside>
+
+            {/* Main Content Area */}
+            <main className="flex-1 relative z-10 flex flex-col items-center bg-[#f4f4f4] overflow-hidden">
+                {viewMode === 'voice' ? (
+                    <div className="flex-1 w-full flex flex-col items-center justify-center p-8 animate-fade-in">
+                        {/* Call Timer Pill */}
+                        {sessionState !== "INACTIVE" && (
+                            <div className="mb-8 flex items-center gap-2 px-4 py-1.5 bg-white/80 backdrop-blur-md rounded-full shadow-sm border border-slate-200 animate-fade-in-down">
+                                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                                <span className="text-slate-600 font-mono font-medium text-sm tracking-wider">
+                                    {formatTime(callSeconds)}
+                                </span>
+                            </div>
+                        )}
+
+                        {/* 3D Orb Section */}
+                        <div className="relative flex items-center justify-center w-[300px] h-[300px] mb-20 group">
+                            <div
+                                className={`absolute w-full h-full rounded-full transition-transform duration-700 shadow-2xl
+                                    ${sessionState === "LISTENING" || sessionState === "SPEAKING" ? "scale-105" : "scale-100"}
+                                    ${sessionState === "THINKING" ? "animate-pulse" : ""}
+                                `}
+                                style={{
+                                    background: "radial-gradient(circle at 30% 30%, #a2def2 0%, #3e8cd6 25%, #2a6857 60%, #153831 100%)",
+                                    boxShadow: "inset -20px -20px 40px rgba(0,0,0,0.5), inset 20px 20px 30px rgba(255,255,255,0.7), 0 30px 50px rgba(0,0,0,0.1)",
+                                    filter: "contrast(1.1) brightness(1.05)"
+                                }}
+                            >
+                                <div className="absolute inset-0 rounded-full mix-blend-overlay opacity-30 pointer-events-none"
+                                    style={{ backgroundImage: "url('data:image/svg+xml,%3Csvg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\"%3E%3Cfilter id=\"noiseFilter\"%3E%3CfeTurbulence type=\"fractalNoise\" baseFrequency=\"0.85\" numOctaves=\"3\" stitchTiles=\"stitch\"/%3E%3C/filter%3E%3Crect width=\"100%25\" height=\"100%25\" filter=\"url(%23noiseFilter)\"/%3E%3C/svg%3E')" }}>
+                                </div>
+                            </div>
+
+                            {(sessionState === "LISTENING" || sessionState === "SPEAKING") && (
+                                <div
+                                    className="absolute rounded-full border border-blue-400/50 bg-blue-100/10 transition-all duration-75 pointer-events-none"
+                                    style={{
+                                        width: `${300 + (volumeLevel * 1.5)}px`,
+                                        height: `${300 + (volumeLevel * 1.5)}px`,
+                                        opacity: Math.max(0.1, volumeLevel / 100)
+                                    }}
+                                ></div>
+                            )}
+
+                            {/* Status Bubble overlay */}
+                            {(sessionState !== "INACTIVE" || ["Connecting...", "Accessing microphone..."].includes(statusText)) && (
+                                <div className="absolute top-[5%] right-[-30%] z-30 animate-fade-in-up md:right-[-40%]">
+                                    <div className="bg-white px-6 py-4 rounded-3xl rounded-bl-sm shadow-[0_10px_40px_rgba(0,0,0,0.08)] max-w-[240px]">
+                                        <p className="text-slate-700 font-medium text-[15px] leading-snug">
+                                            {statusText}
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Control Buttons */}
+                        <div className="flex items-center gap-10 mt-12">
+                            <div className="flex flex-col items-center gap-3">
+                                <button
+                                    onClick={toggleSession}
+                                    className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl border-2
+                                        ${sessionState === "INACTIVE"
+                                            ? "bg-black text-white hover:scale-105 border-black"
+                                            : "bg-red-500 text-white hover:bg-red-600 animate-pulse border-red-500"
+                                        }
+                                    `}
+                                >
+                                    <Phone className="w-8 h-8" fill="currentColor" strokeWidth={1} />
+                                </button>
+                                <span className="text-slate-500 font-medium text-sm">
+                                    {sessionState === "INACTIVE" ? "Call Agent" : "End Call"}
+                                </span>
+                            </div>
+
+                            <div className="flex flex-col items-center gap-3">
+                                <button
+                                    onClick={() => setViewMode('chat')}
+                                    className="w-20 h-20 rounded-full bg-white text-black flex items-center justify-center transition-all duration-300 shadow-lg border border-slate-100 hover:scale-105"
+                                >
+                                    <MessageSquare className="w-8 h-8" fill="none" strokeWidth={1.5} />
+                                </button>
+                                <span className="text-slate-500 font-medium text-sm">Start Chat</span>
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex-1 w-full max-w-4xl flex flex-col bg-white shadow-xl animate-fade-in">
+                        {/* Chat Header */}
+                        <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between bg-white sticky top-0 z-20">
+                            <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white">
+                                    <MessageSquare className="w-5 h-5" />
+                                </div>
+                                <div>
+                                    <h2 className="font-bold text-slate-800">Agent Messenger</h2>
+                                    <div className="flex items-center gap-1.5">
+                                        <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                                        <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Online</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setViewMode('voice')}
+                                className="flex items-center gap-2 px-4 py-2 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all font-medium text-sm"
+                            >
+                                <Home className="w-4 h-4" />
+                                Back to Voice
+                            </button>
+                        </div>
+
+                        {/* Chat Messages */}
+                        <div className="flex-1 overflow-y-auto p-8 flex flex-col gap-6 scrollbar-hide">
+                            {chatMessages.length === 0 && (
+                                <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-4 opacity-40">
+                                    <div className="w-16 h-16 rounded-3xl bg-slate-100 flex items-center justify-center">
+                                        <MessageSquare className="w-8 h-8 stroke-[1.5]" />
+                                    </div>
+                                    <p className="text-sm font-medium">No messages yet. Start a conversation!</p>
+                                </div>
+                            )}
+                            {chatMessages.map((msg, i) => (
+                                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[80%] px-5 py-3.5 rounded-2xl text-[14.5px] leading-relaxed shadow-sm
+                                        ${msg.role === 'user'
+                                            ? 'bg-blue-600 text-white rounded-br-none'
+                                            : 'bg-slate-50 text-slate-800 border border-slate-100 rounded-bl-none'}
+                                    `}>
+                                        {msg.content}
+                                    </div>
+                                </div>
+                            ))}
+                            {isTyping && chatMessages[chatMessages.length - 1]?.role === 'assistant' && chatMessages[chatMessages.length - 1]?.content === "" && (
+                                <div className="flex justify-start">
+                                    <div className="bg-slate-50 px-5 py-3.5 rounded-2xl rounded-bl-none shadow-sm flex gap-1 border border-slate-100">
+                                        <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce"></div>
+                                        <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+                                        <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                                    </div>
+                                </div>
+                            )}
+                            <div ref={chatEndRef} />
+                        </div>
+
+                        {/* Chat Input Area */}
+                        <div className="p-8 bg-white border-t border-slate-100">
+                            <div className="relative max-w-3xl mx-auto flex items-center gap-4">
+                                <div className="flex-1 relative">
+                                    <input
+                                        type="text"
+                                        value={chatInput}
+                                        onChange={(e) => setChatInput(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && sendChatMessage()}
+                                        placeholder="Type your message..."
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 pr-14 text-[15px] focus:outline-none focus:ring-4 focus:ring-blue-500/5 focus:border-blue-500 transition-all focus:bg-white"
+                                    />
+                                    <button
+                                        onClick={sendChatMessage}
+                                        disabled={!chatInput.trim() || isTyping}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+                                    >
+                                        <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24">
+                                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <p className="mt-4 text-center text-[11px] text-slate-400 font-medium uppercase tracking-widest">Powered by Ollama • Built by Indus Students</p>
+                        </div>
+                    </div>
+                )}
+            </main>
+        </div>
+    );
+}

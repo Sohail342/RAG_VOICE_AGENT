@@ -1,6 +1,5 @@
 """User schemas for FastAPI-Users integration."""
 
-
 from beanie import PydanticObjectId
 from fastapi_users import schemas
 

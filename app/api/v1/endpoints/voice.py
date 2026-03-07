@@ -1,0 +1,49 @@
+import logging
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
+
+from app.voice.dependencies import get_voice_agent
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.websocket("")
+async def voice_websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time voice communication.
+    Receives an audio chunk, processes STT->LLM->TTS, and sends audio chunks back.
+    """
+    await websocket.accept()
+    logger.info("Voice WebSocket connection established.", flush=True)
+
+    try:
+        agent = get_voice_agent()
+
+        # Send initial greeting immediately via LLM
+        greeting_prompt = "Introduce yourself as a Voice Agent built by Indus university Students. Ask the user how you can help them today. Keep it brief."
+        async for greeting_audio in agent.process_text_prompt(greeting_prompt):
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_bytes(greeting_audio)
+    except RuntimeError as e:
+        logger.error(str(e))
+        await websocket.close(code=1011, reason="Voice Agent service unavailable")
+        return
+
+    try:
+        while True:
+            # Expecting raw audio bytes
+            audio_data = await websocket.receive_bytes()
+            logger.info(f"Received audio packet: {len(audio_data)} bytes", flush=True)
+
+            # The agent generator streams synthesized sentences one by one
+            async for response_audio in agent.process_audio_stream(audio_data):
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    # Send TTS audio back over websocket
+                    await websocket.send_bytes(response_audio)
+
+    except WebSocketDisconnect:
+        logger.info("Voice WebSocket disconnected gracefully by the client.")
+    except Exception as e:
+        logger.error(f"Voice WebSocket error occurred: {e}")
