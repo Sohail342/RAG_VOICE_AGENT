@@ -1,0 +1,40 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_EXTRAS: dev
+    env_file:
+      - .env.dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+    depends_on:
+      - mongo
+      - redis
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    env_file:
+      - .env.dev
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  mongo_data:
+  ollama_data:

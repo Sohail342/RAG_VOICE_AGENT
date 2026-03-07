@@ -1,0 +1,51 @@
+[project]
+name = "RAG_VOICE_AGENT"
+version = "0.1.0"
+description = "RAG_VOICE_AGENT"
+authors = [
+    {name = "Sohail_Ahmad"},
+]
+
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi>=0.116",
+    "uvicorn[standard]>=0.35",
+    "pydantic>=2.11",
+    "python-dotenv>=1.1",
+    "fastapi-users[beanie]>=14.0",
+    "python-multipart>=0.0.20",
+    "pydantic-settings>=2.10",
+    "motor>=3.7.1",
+]
+
+[dependency-groups]
+
+prod = [
+    "gunicorn>=21.2,<22.0",
+]
+
+dev = [
+    "pytest>=8.4.1",
+    "httpx>=0.28.1",
+    "ruff>=0.12.11",
+    "mypy>=1.17.1",
+    "pre-commit>=3.7.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+lint.extend-select = ["I"]
+fix = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+combine-as-imports = true
+force-single-line = false
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

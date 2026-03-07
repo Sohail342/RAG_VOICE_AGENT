@@ -1,0 +1,22 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-toml
+      - id: check-yaml
+        args: [--unsafe]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        exclude: ^(\.venv|venv|env)/
+
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.6.5
+    hooks:
+      - id: ruff
+        args: [--fix]
+        exclude: ^(\.venv|venv|env)/
+
+ci:
+  autofix_commit_msg: "[pre-commit.ci] Auto format from pre-commit.com hooks"
+  autoupdate_commit_msg: "[pre-commit.ci] pre-commit autoupdate"
