@@ -1,6 +1,6 @@
 # 🎙️ RAG Voice Agent
 
-![RAG Voice Agent Logo](C:\Users\HP\.gemini\antigravity\brain\849560d2-007a-42e9-a844-fadffaea506e\rag_voice_agent_hero_logo_1772929028389.png)
+![RAG Voice Agent Logo](/logo.png)
 
 > **Intelligence Redefined.** A high-performance, private-by-design Voice Agent powered by Retrieval-Augmented Generation.
 
@@ -72,20 +72,6 @@ The agent orchestrates a sophisticated pipeline to ensure fluid interaction:
     Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ---
-
-## 👥 Meet the Team
-
-This project was envisioned and built by the students of **Indus University**:
-
-*   **Sohail** - Lead Architecture & Backend
-*   **Sajjad** - UI/UX & Frontend Optimization
-*   **Athesham** - Neural Pipeline & RAG Logic
-
----
-
-## 📄 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
 
 <p align="center">
   <i>Built with ❤️ for Indus University</i>
