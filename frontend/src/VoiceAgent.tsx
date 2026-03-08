@@ -769,22 +769,24 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                 ) : viewMode === 'chat' ? (
                     <div className="flex-1 w-full max-w-5xl my-2 md:my-6 mx-2 md:mx-auto flex flex-col bg-white/80 backdrop-blur-2xl shadow-[0_8px_30px_rgb(0,0,0,0.06)] rounded-3xl animate-fade-in min-h-0 border border-white relative overflow-hidden">
                         {/* Chat Header */}
-                        <div className="px-6 py-5 border-b border-slate-200/40 flex items-center justify-between bg-white/40 backdrop-blur-xl sticky top-0 z-20">
+                        <div className={`px-6 py-5 border-b flex items-center justify-between backdrop-blur-xl sticky top-0 z-20 ${useRag ? 'bg-indigo-50/80 border-indigo-100/50' : 'bg-white/40 border-slate-200/40'}`}>
                             <div className="flex items-center gap-4">
-                                <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white">
-                                    <MessageSquare className="w-5 h-5" />
+                                <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white ${useRag ? 'bg-indigo-600 shadow-indigo-200 shadow-md' : 'bg-blue-600'}`}>
+                                    {useRag ? <Settings className="w-5 h-5" /> : <MessageSquare className="w-5 h-5" />}
                                 </div>
                                 <div>
-                                    <h2 className="font-bold text-slate-800">Agent Messenger</h2>
+                                    <h2 className={`font-bold ${useRag ? 'text-indigo-900' : 'text-slate-800'}`}>
+                                        {useRag ? 'Knowledge Base Agent' : 'Standard Agent'}
+                                    </h2>
                                     <div className="flex items-center gap-1.5">
                                         <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                                        <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Online</span>
+                                        <span className={`text-xs font-medium uppercase tracking-wider ${useRag ? 'text-indigo-400' : 'text-slate-400'}`}>Online</span>
                                     </div>
                                 </div>
                             </div>
                             <button
                                 onClick={() => setViewMode('voice')}
-                                className="flex items-center gap-2 px-4 py-2 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all font-medium text-sm"
+                                className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all font-medium text-sm ${useRag ? 'text-indigo-500 hover:text-indigo-700 hover:bg-indigo-100/50' : 'text-slate-500 hover:text-blue-600 hover:bg-blue-50'}`}
                             >
                                 <Home className="w-4 h-4" />
                                 Back to Voice
@@ -794,16 +796,20 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                         {/* Chat Messages */}
                         <div className="flex-1 overflow-y-auto p-6 md:p-8 flex flex-col gap-6 scrollbar-hide relative z-10">
                             {chatMessages.length === 0 && (
-                                <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-5 opacity-80 animate-fade-in-up">
+                                <div className={`flex flex-col items-center justify-center h-full gap-5 opacity-80 animate-fade-in-up ${useRag ? 'text-indigo-300' : 'text-slate-400'}`}>
                                     <div className="relative">
-                                        <div className="absolute inset-0 bg-blue-400 blur-xl opacity-20 rounded-full"></div>
-                                        <div className="w-20 h-20 rounded-[2rem] bg-gradient-to-br from-white to-slate-50 flex items-center justify-center shadow-sm border border-slate-100 relative z-10">
-                                            <MessageSquare className="w-10 h-10 text-blue-500 stroke-[1.5]" />
+                                        <div className={`absolute inset-0 blur-xl opacity-20 rounded-full ${useRag ? 'bg-indigo-400' : 'bg-blue-400'}`}></div>
+                                        <div className={`w-20 h-20 rounded-[2rem] flex items-center justify-center shadow-sm border relative z-10 ${useRag ? 'bg-gradient-to-br from-indigo-50 to-white border-indigo-100' : 'bg-gradient-to-br from-white to-slate-50 border-slate-100'}`}>
+                                            {useRag ? <Settings className="w-10 h-10 text-indigo-500 stroke-[1.5]" /> : <MessageSquare className="w-10 h-10 text-blue-500 stroke-[1.5]" />}
                                         </div>
                                     </div>
                                     <div className="text-center">
-                                        <h3 className="text-slate-700 font-semibold text-base mb-1">Start a Conversation</h3>
-                                        <p className="text-sm font-medium text-slate-500">Ask the agent anything to begin.</p>
+                                        <h3 className={`font-semibold text-base mb-1 ${useRag ? 'text-indigo-800' : 'text-slate-700'}`}>
+                                            {useRag ? 'Search the Knowledge Base' : 'Start a Conversation'}
+                                        </h3>
+                                        <p className={`text-sm font-medium ${useRag ? 'text-indigo-500/80' : 'text-slate-500'}`}>
+                                            {useRag ? 'Ask questions about your uploaded documents.' : 'Ask the agent anything to begin.'}
+                                        </p>
                                     </div>
                                 </div>
                             )}
@@ -811,7 +817,9 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`} style={{ animationFillMode: 'both' }}>
                                     <div className={`max-w-[85%] md:max-w-[75%] px-6 py-4 rounded-3xl text-[15px] leading-relaxed
                                         ${msg.role === 'user'
-                                            ? 'bg-gradient-to-tr from-blue-600 to-blue-500 text-white shadow-md shadow-blue-500/20 rounded-br-sm'
+                                            ? (useRag
+                                                ? 'bg-gradient-to-tr from-indigo-600 to-indigo-500 text-white shadow-md shadow-indigo-500/20 rounded-br-sm'
+                                                : 'bg-gradient-to-tr from-blue-600 to-blue-500 text-white shadow-md shadow-blue-500/20 rounded-br-sm')
                                             : 'bg-white text-slate-800 shadow-[0_2px_10px_rgba(0,0,0,0.02)] border border-slate-100/60 rounded-bl-sm'}
                                     `}>
                                         {msg.content}
@@ -820,10 +828,10 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                             ))}
                             {isTyping && chatMessages[chatMessages.length - 1]?.role === 'assistant' && chatMessages[chatMessages.length - 1]?.content === "" && (
                                 <div className="flex justify-start">
-                                    <div className="bg-slate-50 px-5 py-3.5 rounded-2xl rounded-bl-none shadow-sm flex gap-1 border border-slate-100">
-                                        <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce"></div>
-                                        <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce [animation-delay:0.2s]"></div>
-                                        <div className="w-1.5 h-1.5 bg-slate-300 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                                    <div className={`px-5 py-3.5 rounded-2xl rounded-bl-none shadow-sm flex gap-1 border ${useRag ? 'bg-indigo-50/50 border-indigo-100' : 'bg-slate-50 border-slate-100'}`}>
+                                        <div className={`w-1.5 h-1.5 rounded-full animate-bounce ${useRag ? 'bg-indigo-300' : 'bg-slate-300'}`}></div>
+                                        <div className={`w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:0.2s] ${useRag ? 'bg-indigo-300' : 'bg-slate-300'}`}></div>
+                                        <div className={`w-1.5 h-1.5 rounded-full animate-bounce [animation-delay:0.4s] ${useRag ? 'bg-indigo-300' : 'bg-slate-300'}`}></div>
                                     </div>
                                 </div>
                             )}
@@ -834,26 +842,26 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                         <div className="p-4 md:p-6 bg-transparent relative z-10 w-full">
                             <div className="relative max-w-4xl mx-auto flex flex-col gap-3">
                                 <div className="flex-1 relative group w-full">
-                                    <div className="absolute inset-0 bg-gradient-to-r from-blue-100 to-indigo-100 rounded-full blur-md opacity-0 group-focus-within:opacity-60 transition-opacity duration-500"></div>
+                                    <div className={`absolute inset-0 rounded-full blur-md opacity-0 group-focus-within:opacity-60 transition-opacity duration-500 ${useRag ? 'bg-gradient-to-r from-indigo-100 to-purple-100' : 'bg-gradient-to-r from-blue-100 to-indigo-100'}`}></div>
                                     <input
                                         type="text"
                                         value={chatInput}
                                         onChange={(e) => setChatInput(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && sendChatMessage()}
-                                        placeholder="Type your message..."
-                                        className="w-full bg-white/95 backdrop-blur-sm border border-slate-200/80 rounded-full px-8 py-4 pr-16 text-[15px] focus:outline-none focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 transition-all shadow-[0_2px_15px_rgba(0,0,0,0.03)] relative z-10"
+                                        placeholder={useRag ? "Ask about your documents..." : "Type your message..."}
+                                        className={`w-full bg-white/95 backdrop-blur-sm border rounded-full px-8 py-4 pr-16 text-[15px] focus:outline-none focus:ring-4 transition-all shadow-[0_2px_15px_rgba(0,0,0,0.03)] relative z-10 ${useRag ? 'border-indigo-100 focus:border-indigo-400/50 focus:ring-indigo-500/10' : 'border-slate-200/80 focus:border-blue-500/50 focus:ring-blue-500/10'}`}
                                     />
                                     <button
                                         onClick={sendChatMessage}
                                         disabled={!chatInput.trim() || isTyping}
-                                        className="absolute right-2 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center bg-blue-600 text-white rounded-full hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/30 disabled:bg-slate-100 disabled:text-slate-400 transition-all disabled:opacity-50 active:scale-95 z-20"
+                                        className={`absolute right-2 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center text-white rounded-full transition-all disabled:opacity-50 active:scale-95 z-20 ${useRag ? 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-lg hover:shadow-indigo-600/30 disabled:bg-slate-100 disabled:text-slate-400' : 'bg-blue-600 hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/30 disabled:bg-slate-100 disabled:text-slate-400'}`}
                                     >
                                         <svg className="w-5 h-5 fill-current ml-0.5" viewBox="0 0 24 24">
                                             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
                                         </svg>
                                     </button>
                                 </div>
-                                <p className="text-center text-[10px] text-slate-400/80 font-semibold uppercase tracking-widest">Powered by Ollama • Built by Indus Students</p>
+                                <p className="text-center text-[10px] text-slate-400/80 font-semibold uppercase tracking-widest">{useRag ? "Powered by ChromaDB & Ollama" : "Powered by Ollama"}</p>
                             </div>
                         </div>
                     </div>
