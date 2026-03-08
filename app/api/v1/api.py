@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import voice, chat
+from app.api.v1.endpoints import chat, voice
 from app.core.security import auth_backend
 from app.core.users import fastapi_users
 from app.schemas.user import UserCreate, UserRead, UserUpdate

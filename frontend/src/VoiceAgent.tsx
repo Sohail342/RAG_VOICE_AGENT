@@ -14,6 +14,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [callSeconds, setCallSeconds] = useState(0);
     const [viewMode, setViewMode] = useState<'voice' | 'chat'>('voice');
+    const [isInitialConnecting, setIsInitialConnecting] = useState(false);
 
     // Chat State
     const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
@@ -161,9 +162,13 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
         setIsTyping(true);
 
         try {
+            const token = localStorage.getItem('token');
             const response = await fetch('/api/v1/chat', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
                 body: JSON.stringify({ message: userMsg }),
             });
 
@@ -203,10 +208,13 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
             }
 
             initAudioContext();
-            setStatusText("Connecting...");
+            if (sessionStateRef.current === "INACTIVE" || statusText === "Waking agent up...") {
+                setStatusText("Connecting...");
+            }
 
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice`;
+            const token = localStorage.getItem('token');
+            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice${token ? `?token=${token}` : ''}`;
             const ws = new WebSocket(wsUrl);
             ws.binaryType = 'arraybuffer';
 
@@ -222,6 +230,9 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                     return;
                 }
 
+                if (isInitialConnecting) {
+                    setIsInitialConnecting(false);
+                }
                 setSessionState("SPEAKING");
                 setStatusText("Agent speaks...");
 
@@ -443,8 +454,8 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
 
                 setViewMode('voice'); // Ensure we are in voice view when calling
                 // Triggers WebSocket open -> `voice.py` sends `generate_greeting` LLM payload -> we get `SPEAKING`.
+                setIsInitialConnecting(true);
                 await connectAndWaitForSocket();
-                setStatusText("Waking agent up...");
             } catch (err) {
                 console.error("Microphone access error:", err);
                 setStatusText("Microphone permission denied.");

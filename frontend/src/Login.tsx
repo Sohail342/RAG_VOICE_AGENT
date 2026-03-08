@@ -60,6 +60,11 @@ export default function Login({ onLogin }: LoginProps) {
                     throw new Error('Invalid email or password.');
                 }
 
+                const data = await response.json();
+                if (data.access_token) {
+                    localStorage.setItem('token', data.access_token);
+                }
+
                 // If success, trigger the app login state
                 onLogin();
             }
@@ -85,22 +90,22 @@ export default function Login({ onLogin }: LoginProps) {
                 <div className="hidden lg:flex flex-col text-slate-900">
                     <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-100/50 border border-blue-200 text-blue-600 text-xs font-bold uppercase tracking-widest mb-8 w-fit">
                         <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></div>
-                        Logistics Redefined
+                        Intelligence Redefined
                     </div>
 
                     <h1 className="text-6xl font-extrabold tracking-tight leading-[1.1] mb-8 text-slate-900">
-                        Premier Domestic<br />
-                        <span className="text-blue-600">Transportation</span>
+                        Neural Conversational<br />
+                        <span className="text-blue-600">Intelligence</span>
                     </h1>
 
                     <div className="space-y-10 max-w-lg">
                         <div className="flex gap-6 group">
                             <div className="w-14 h-14 rounded-2xl bg-white shadow-md border border-slate-100 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform duration-300">
-                                <ArrowRight className="w-6 h-6 text-blue-600 -rotate-45" />
+                                <ArrowRight className="w-6 h-6 text-blue-600" />
                             </div>
                             <div>
-                                <h3 className="text-xl font-bold text-slate-800 mb-2">Domestic Transportation</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed">FTL, LTL, Rail, Expedited, and Specialized Haul solutions tailored for your business.</p>
+                                <h3 className="text-xl font-bold text-slate-800 mb-2">Knowledge-Driven Chat (RAG)</h3>
+                                <p className="text-slate-500 text-sm leading-relaxed">Dynamic Retrieval Augmented Generation allows your agent to speak with the authority of your entire local knowledge base.</p>
                             </div>
                         </div>
                         <div className="flex gap-6 group">
@@ -108,8 +113,8 @@ export default function Login({ onLogin }: LoginProps) {
                                 <Loader2 className="w-6 h-6 text-blue-600" />
                             </div>
                             <div>
-                                <h3 className="text-xl font-bold text-slate-800 mb-2">LDP / DDP Services</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed">Hassle-Free Landed Duty Paid solutions and dedicated trade advising professionals.</p>
+                                <h3 className="text-xl font-bold text-slate-800 mb-2">Low-Latency Voice</h3>
+                                <p className="text-slate-500 text-sm leading-relaxed">Stutter-free neural pipeline ensuring near-instant response times for fluid, human-like conversations.</p>
                             </div>
                         </div>
                         <div className="flex gap-6 group">
@@ -117,8 +122,8 @@ export default function Login({ onLogin }: LoginProps) {
                                 <Mail className="w-6 h-6 text-blue-600" />
                             </div>
                             <div>
-                                <h3 className="text-xl font-bold text-slate-800 mb-2">Warehousing & Distribution</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed">Strategic storage locations with full-service pick, pack, and comprehensive fulfillment.</p>
+                                <h3 className="text-xl font-bold text-slate-800 mb-2">Private by Design</h3>
+                                <p className="text-slate-500 text-sm leading-relaxed">Local-first processing ensures that your proprietary data and conversations never leave your infrastructure.</p>
                             </div>
                         </div>
                     </div>

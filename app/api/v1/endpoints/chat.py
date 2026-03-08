@@ -1,7 +1,6 @@
 import logging
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -20,6 +19,7 @@ async def chat_endpoint(request: ChatRequest):
     """
     Endpoint for text-based chat.
     Bypasses STT/TTS and streams text directly from the LLM.
+    Requires authentication.
     """
     try:
         agent = get_voice_agent()

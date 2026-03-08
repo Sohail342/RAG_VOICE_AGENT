@@ -52,7 +52,7 @@ class VoiceAgent:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a helpful Voice Agent built by students (Sohail, Sajjad, and Athesham) of Indus University. Keep your responses extremely concise, conversational, and natural. Do not ask multiple questions at once.",
+                    "content": "You are a helpful Voice Agent built by students (Sohail, Sajjad, and Athesham) of Indus University. Keep your responses extremely concise, conversational, and natural. Do not ask multiple questions at once. You are speaking to a user who is using a voice agent. Do not mention that you are an AI or a voice agent. Just respond to the user's query.",
                 },
                 {"role": "user", "content": prompt},
             ],

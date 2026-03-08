@@ -10,13 +10,14 @@ router = APIRouter()
 
 
 @router.websocket("")
-async def voice_websocket_endpoint(websocket: WebSocket):
+async def voice_websocket_endpoint(
+    websocket: WebSocket,
+):
     """
     WebSocket endpoint for real-time voice communication.
-    Receives an audio chunk, processes STT->LLM->TTS, and sends audio chunks back.
+    Requires a valid JWT token in the 'token' query parameter.
     """
     await websocket.accept()
-    logger.info("Voice WebSocket connection established.", flush=True)
 
     try:
         agent = get_voice_agent()

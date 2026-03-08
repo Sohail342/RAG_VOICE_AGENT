@@ -1,8 +1,8 @@
 import logging
 
+from app.agent.agent import VoiceAgent
 from app.core.config import settings
 
-from app.agent.agent import VoiceAgent
 from .sentence_buffer import SentenceBuffer
 from .stt import SpeechToText
 from .tts import TextToSpeech
