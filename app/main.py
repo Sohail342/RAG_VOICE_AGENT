@@ -1,5 +1,6 @@
 """Main FastAPI application."""
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +10,11 @@ from app.api.v1.api import api_v1_router
 from app.core.config import settings
 from app.database.mongo import close_db, init_db
 from app.voice.dependencies import close_voice_services, init_voice_services
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 
 
 def create_application() -> FastAPI:
@@ -64,6 +70,41 @@ async def lifespan(app: FastAPI):
     # Initialize Voice Services (STT, TTS, LLM)
     init_voice_services()
 
+    # Initialize Qdrant RAG securely within lifespan
+    try:
+        import asyncio
+
+        from app.core.rag import get_rag
+
+        # Run initialization in thread so it doesn't block the ASGI loop
+        app.state.rag = await asyncio.to_thread(get_rag)
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to load RAG system: {e}")
+
+    # Warmup Ollama model in the background
+    async def warmup_ollama():
+        import aiohttp
+
+        try:
+            logger = logging.getLogger(__name__)
+            logger.info(f"Warming up Ollama model '{settings.OLLAMA_MODEL}'...")
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "model": settings.OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "keep_alive": -1,
+                }
+                url = f"{settings.OLLAMA_API_BASE_URL.rstrip('/')}/api/chat"
+                async with session.post(url, json=payload) as response:
+                    await response.text()
+                    logger.info("Ollama model warmed up and loaded into VRAM.")
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Failed to warm up Ollama model: {e}")
+
+    import asyncio
+
+    asyncio.create_task(warmup_ollama())
+
     try:
         yield
     finally:
@@ -87,10 +128,4 @@ def root():
 
 @app.get("/health")
 async def health():
-    from app.llm.prompt_templates import get_prompt_template
-
-    response = await get_prompt_template(
-        "What is the capital of France?", "llama3.2:3b"
-    )
-    print(f"LLM response: {response}")
     return {"status": "ok"}

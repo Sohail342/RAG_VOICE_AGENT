@@ -11,8 +11,6 @@ class SentenceBuffer:
 
     def __init__(self):
         # Regex to split on spaces following sentence-ending punctuation.
-        # Uses Negative Lookbehind to avoid splitting on common abbreviations (Dr., Mr., U.S.)
-        # and Positive Lookahead to ensure the next word starts with a capital letter.
         self.sentence_boundary = re.compile(
             r"(?<=(?<!Dr)(?<!Mr)(?<!Ms)(?<!Mrs)(?<!St)[.!?])\s+(?=[A-Z])"
         )
@@ -36,10 +34,8 @@ class SentenceBuffer:
                     if clean_sentence:
                         yield clean_sentence
 
-                # The remaining incomplete sentence goes back to the buffer
                 buffer = parts[-1]
 
-        # End of stream, yield anything left in the buffer
         buffer = buffer.strip()
         if buffer:
             yield buffer

@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     OLLAMA_API_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2:3b"
 
+    # Redis Configuration
+    REDIS_URL: str = "redis://redis:6379/0"
+
+    # Chroma Vector DB Configuration
+    CHROMA_URL: str = "http://chroma:8000"
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True,

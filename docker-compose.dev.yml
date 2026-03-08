@@ -24,6 +24,14 @@ services:
     depends_on:
       - mongo
       - redis
+      - chroma
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
 
   mongo:
     image: mongo:7
@@ -43,3 +51,4 @@ services:
 volumes:
   mongo_data:
   ollama_data:
+  chroma_data:

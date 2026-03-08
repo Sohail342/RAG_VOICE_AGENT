@@ -42,22 +42,41 @@ class VoiceAgent:
         if self.client_session and not self.client_session.closed:
             await self.client_session.close()
 
-    async def _stream_ollama(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def _stream_ollama(
+        self, prompt: str, session_id: Optional[str] = None
+    ) -> AsyncGenerator[str, None]:
         """
         Streams response from Ollama over HTTP using NDJSON.
         """
+        from app.core.memory import memory_db
+
         session = self._get_session()
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful Voice Agent, name as IndusVoiceLab built by students (Sohail, Sajjad, and Athesham) of Indus University. Keep your responses extremely concise, conversational, and natural. Do not ask multiple questions at once. You are speaking to a user who is using a voice agent. Do not mention that you are an AI or a voice agent. Just respond to the user's query.",
+            }
+        ]
+
+        if session_id:
+            # Fetch last 10 interactions context
+            history = await memory_db.get_history(session_id, limit=10)
+            messages.extend(history)
+
+            # Save new ORIGINAL user query just in case
+            await memory_db.add_message(session_id, "user", prompt)
+
+        messages.append({"role": "user", "content": prompt})
+
         payload = {
             "model": self.ollama_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful Voice Agent built by students (Sohail, Sajjad, and Athesham) of Indus University. Keep your responses extremely concise, conversational, and natural. Do not ask multiple questions at once. You are speaking to a user who is using a voice agent. Do not mention that you are an AI or a voice agent. Just respond to the user's query.",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "stream": True,
+            "keep_alive": -1,  # Keep model loaded indefinitely
         }
+
+        full_response = []
 
         try:
             async with session.post(self.ollama_url, json=payload) as response:
@@ -72,17 +91,28 @@ class VoiceAgent:
                     data = json.loads(line.decode("utf-8"))
 
                     if "message" in data and "content" in data["message"]:
-                        yield data["message"]["content"]
+                        chunk = data["message"]["content"]
+                        full_response.append(chunk)
+                        yield chunk
 
                     if data.get("done"):
                         break
 
+            # Save the final text back to memory
+            if full_response:
+                assistant_text = "".join(full_response).strip()
+                if assistant_text:
+                    if session_id:
+                        await memory_db.add_message(
+                            session_id, "assistant", assistant_text
+                        )
+
         except Exception as e:
-            logger.error(f"Error communicating with Ollama: {e}", flush=True)
+            logger.error(f"Error communicating with Ollama: {e}")
             yield "Sorry, I had trouble thinking of a response."
 
     async def process_audio_stream(
-        self, audio_bytes: bytes
+        self, audio_bytes: bytes, session_id: Optional[str] = None
     ) -> AsyncGenerator[bytes, None]:
         """
         Main pipeline: Audio -> STT -> LLM Stream -> Sentence Buffer -> TTS -> Audio chunks
@@ -90,19 +120,21 @@ class VoiceAgent:
         # Transcribe audio
         try:
             text = await self.stt.transcribe(audio_bytes)
-            logger.info(f"User Transcribed: '{text}'", flush=True)
+            logger.info(f"User Transcribed: '{text}'")
         except Exception as e:
-            logger.error(f"STT Pipeline error: {e}", flush=True)
+            logger.error(f"STT Pipeline error: {e}")
             yield b""
             return
 
-        if not text:
-            # User stayed silent for 3 seconds
-            logger.info("No speech detected. Prompting LLM proactively.", flush=True)
-            text = "(The user has remained silent. Ask a very brief, friendly question to encourage them to speak or ask if they are still there.)"
+        if not text or not text.strip():
+            # False alarm (e.g. ambient noise or throat clear)
+            logger.info(
+                "Empty transcription. Ignoring (no message, don't send to LLM)."
+            )
+            yield b""
+            return
 
-        # Get LLM response stream
-        llm_stream = self._stream_ollama(text)
+        llm_stream = self._stream_ollama(text, session_id=session_id)
 
         # Buffer into sentences before TTS to avoid weird intonation
         sentence_stream = self.sentence_buffer.process_stream(llm_stream)
@@ -112,7 +144,7 @@ class VoiceAgent:
             if not sentence.strip():
                 continue
 
-            logger.info(f"Agent generating TTS for: {sentence}", flush=True)
+            logger.info(f"Agent generating TTS for: {sentence}")
             try:
                 # Get wav audio
                 audio_chunk = await self.tts.generate_audio(sentence)
@@ -122,15 +154,16 @@ class VoiceAgent:
                     f"Error generating audio for sentence '{sentence}': {e}", flush=True
                 )
 
-    async def process_text_prompt(self, prompt: str) -> AsyncGenerator[bytes, None]:
+    async def process_text_prompt(
+        self, prompt: str, session_id: Optional[str] = None
+    ) -> AsyncGenerator[bytes, None]:
         """
         Processes a raw text prompt through the LLM -> TTS pipeline.
         Useful for triggering initial greetings without audio input.
         """
-        logger.info(f"Agent processing text prompt: '{prompt}'", flush=True)
+        logger.info(f"Agent processing text prompt: '{prompt}'")
 
-        # Get LLM response stream
-        llm_stream = self._stream_ollama(prompt)
+        llm_stream = self._stream_ollama(prompt, session_id=session_id)
 
         # Buffer into sentences before TTS to avoid weird intonation
         sentence_stream = self.sentence_buffer.process_stream(llm_stream)
@@ -140,7 +173,7 @@ class VoiceAgent:
             if not sentence.strip():
                 continue
 
-            logger.info(f"Agent generating TTS for: {sentence}", flush=True)
+            logger.info(f"Agent generating TTS for: {sentence}")
             try:
                 # Get wav audio
                 audio_chunk = await self.tts.generate_audio(sentence)
@@ -154,7 +187,7 @@ class VoiceAgent:
         """
         Directly generates TTS for a specific string (used for initial connection greeting).
         """
-        logger.info(f"Agent generating Greeting TTS: {text}", flush=True)
+        logger.info(f"Agent generating Greeting TTS: {text}")
         try:
             audio_chunk = await self.tts.generate_audio(text)
             return audio_chunk
@@ -162,10 +195,12 @@ class VoiceAgent:
             logger.error(f"Error generating greeting audio: {e}")
             return b""
 
-    async def process_text_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def process_text_chat(
+        self, prompt: str, session_id: Optional[str] = None
+    ) -> AsyncGenerator[str, None]:
         """
         Processes a raw text prompt and yields text responses directly (no TTS/STT).
         """
-        logger.info(f"Agent processing text chat: '{prompt}'", flush=True)
-        async for chunk in self._stream_ollama(prompt):
+        logger.info(f"Agent processing text chat: '{prompt}'")
+        async for chunk in self._stream_ollama(prompt, session_id=session_id):
             yield chunk

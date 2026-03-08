@@ -12,9 +12,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Copy dependency files
 COPY pyproject.toml ./
 
-ARG INSTALL_EXTRAS=prod
 # Install packages into a virtualenv
-RUN uv lock && uv sync --${INSTALL_EXTRAS} --frozen --no-cache
+RUN uv lock && uv sync --no-dev --frozen --no-cache
 
 
 # Stage 2: Runtime
@@ -32,11 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m appuser
 
-# Download Piper TTS default model (to ensure self-contained fallback)
-RUN mkdir -p /app/models \
-    && wget -q -O /app/models/en_US-lessac-medium.onnx "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx?download=true" \
-    && wget -q -O /app/models/en_US-lessac-medium.onnx.json "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json?download=true" \
-    && chown -R appuser:appuser /app/models
 
 #  copy uv binaries from builder stage
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -53,4 +47,4 @@ RUN chown appuser:appuser /app
 USER appuser
 
 
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "-b", "0.0.0.0:8000", "--workers", "4", "--timeout", "120"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

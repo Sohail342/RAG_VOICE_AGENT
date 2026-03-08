@@ -8,6 +8,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      chroma:
+        condition: service_healthy
     restart: unless-stopped
     command: >
       gunicorn -k uvicorn.workers.UvicornWorker app.main:app
@@ -26,6 +28,22 @@ services:
       start_period: 30s
     ports:
       - "8000:8000"
+    networks:
+      - backend
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - backend
 
@@ -80,6 +98,8 @@ volumes:
   mongo_backups:
     driver: local
   redis_data:
+    driver: local
+  chroma_data:
     driver: local
 
 networks:

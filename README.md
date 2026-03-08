@@ -53,14 +53,14 @@ The agent orchestrates a sophisticated pipeline to ensure fluid interaction:
 
 1.  **Clone the Repository**:
     ```bash
-    git clone https://github.com/your-repo/rag-voice-agent.git
-    cd rag-voice-agent
+    git clone https://github.com/Sohail342/RAG_VOICE_AGENT.git
+    cd RAG_VOICE_AGENT
     ```
 
 2.  **Configure Environment**:
     Copy the sample environment file and adjust your settings:
     ```bash
-    cp .env.dev .env
+    cp .env.dev.example .env.dev
     ```
 
 3.  **Launch with Docker**:

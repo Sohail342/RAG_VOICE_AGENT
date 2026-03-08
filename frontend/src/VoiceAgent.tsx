@@ -13,7 +13,8 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     const [volumeLevel, setVolumeLevel] = useState(0);
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [callSeconds, setCallSeconds] = useState(0);
-    const [viewMode, setViewMode] = useState<'voice' | 'chat'>('voice');
+    const [viewMode, setViewMode] = useState<'voice' | 'chat' | 'files'>('voice');
+    const [useRag, setUseRag] = useState(true);
     const [isInitialConnecting, setIsInitialConnecting] = useState(false);
 
     // Chat State
@@ -26,6 +27,67 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
+    // Files State
+    const [uploadFile, setUploadFile] = useState<File | null>(null);
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadStatus, setUploadStatus] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+    const [uploadedFiles, setUploadedFiles] = useState<{ filename: string, chunks: number, uploaded_by: string }[]>([]);
+
+    useEffect(() => {
+        if (viewMode === 'files') {
+            const token = localStorage.getItem('token');
+            fetch('/api/v1/files', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        setUploadedFiles(data.files);
+                    }
+                })
+                .catch(err => console.error("Failed to fetch files", err));
+        }
+    }, [viewMode]);
+
+    const handleUpload = async () => {
+        if (!uploadFile) return;
+        setIsUploading(true);
+        setUploadStatus(null);
+
+        try {
+            const formData = new FormData();
+            formData.append("file", uploadFile);
+            const token = localStorage.getItem('token');
+
+            const res = await fetch("/api/v1/files/upload", {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                },
+                body: formData
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                setUploadStatus({ type: 'success', message: `${data.message} - embedded ${data.chunks_embedded} chunks.` });
+                setUploadFile(null);
+
+                // Refresh list
+                const t = localStorage.getItem('token');
+                fetch('/api/v1/files', { headers: { 'Authorization': `Bearer ${t}` } })
+                    .then(r => r.json())
+                    .then(d => { if (d.status === 'success') setUploadedFiles(d.files); });
+            } else {
+                const err = await res.json();
+                setUploadStatus({ type: 'error', message: err.detail || "Upload failed." });
+            }
+        } catch (error) {
+            setUploadStatus({ type: 'error', message: "Network error occurred." });
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
     useEffect(() => {
         if (viewMode === 'chat') scrollToBottom();
     }, [chatMessages, viewMode]);
@@ -36,6 +98,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     }, [sessionState]);
 
     const socketRef = useRef<WebSocket | null>(null);
+    const sessionIdRef = useRef<string>(globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Math.random().toString(36).substring(2, 15));
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
     const audioQueueRef = useRef<AudioBuffer[]>([]);
@@ -45,6 +108,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     const silenceTimeoutRef = useRef<number | null>(null);
     const pollingIntervalRef = useRef<number | null>(null);
     const noSpeechTimeoutRef = useRef<any>(null); // Allow any for NodeJs.Timeout/number compat
+    const isTimeoutStopRef = useRef<boolean>(false);
 
     // Playback debounce ref
     const doneSpeakingTimeoutRef = useRef<number | null>(null);
@@ -169,7 +233,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ message: userMsg }),
+                body: JSON.stringify({ message: userMsg, session_id: sessionIdRef.current, use_rag: useRag }),
             });
 
             if (!response.body) return;
@@ -214,7 +278,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
 
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const token = localStorage.getItem('token');
-            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice${token ? `?token=${token}` : ''}`;
+            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice${token ? `?token=${token}&` : '?'}session_id=${sessionIdRef.current}&use_rag=${useRag}`;
             const ws = new WebSocket(wsUrl);
             ws.binaryType = 'arraybuffer';
 
@@ -363,6 +427,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                 if (!noSpeechTimeoutRef.current) {
                     noSpeechTimeoutRef.current = setTimeout(() => {
                         console.log("No speech detected for 3 seconds. Progressing conversation.");
+                        isTimeoutStopRef.current = true;
                         if (mediaRecorderRef.current?.state === "recording") {
                             mediaRecorderRef.current.stop();
                         }
@@ -399,10 +464,17 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
 
             mr.onstop = () => {
                 const completeBlob = new Blob(localChunks, { type: mr.mimeType });
-                console.log(`User turn complete. Blob: ${completeBlob.size} bytes`);
+                console.log(`User turn complete. Blob: ${completeBlob.size} bytes. Timeout: ${isTimeoutStopRef.current}`);
 
                 if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-                    socketRef.current.send(completeBlob);
+                    if (isTimeoutStopRef.current) {
+                        // Send text flag instead of silent audio to trigger proactive response explicitly without STT
+                        socketRef.current.send("TIMEOUT");
+                    } else {
+                        // Send actual audio
+                        socketRef.current.send(completeBlob);
+                    }
+
                     setSessionState("THINKING");
                     setStatusText("Agent thinking...");
                 } else {
@@ -412,6 +484,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
             };
 
             if (mr.state === "inactive") {
+                isTimeoutStopRef.current = false;
                 mr.start();
                 setSessionState("LISTENING");
                 setStatusText("Listening...");
@@ -467,102 +540,143 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     };
 
     return (
-        <div className="min-h-screen flex bg-[#f4f4f4] relative overflow-hidden font-sans">
+        <div className="h-screen flex bg-[#f4f4f4] relative overflow-hidden font-sans">
 
             {/* Collapsible Sidebar */}
             <aside
-                className={`relative z-20 flex flex-col bg-white border-r border-slate-200/60 transition-all duration-500 ease-in-out shadow-[4px_0_24px_rgba(0,0,0,0.02)] overflow-x-hidden ${isSidebarOpen ? 'w-72' : 'w-20'}`}
+                className={`relative z-20 flex flex-col bg-[#f9f9fb] border-r border-slate-200/60 transition-all duration-500 ease-in-out shadow-[4px_0_24px_rgba(0,0,0,0.02)] overflow-x-hidden ${isSidebarOpen ? 'w-72' : 'w-20'}`}
             >
-                {/* Sidebar Header - Enhanced Logo Integration */}
-                <div className="h-24 flex items-center justify-between px-5 relative">
-                    <div className={`flex items-center gap-3 transition-all duration-500 ${isSidebarOpen ? 'opacity-100 translate-x-0' : 'opacity-100 translate-x-0 mx-auto'}`}>
-                        <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-lg shadow-blue-500/20 group-hover:scale-105 transition-transform">
-                            <img src="/logo-removebg.png" alt="Logo" className="w-7 h-7 object-contain brightness-0 invert" />
+                {/* Sidebar Header - ElevenLabs Style Branding */}
+                <div className="pt-6 px-4 pb-2 relative group">
+                    <div className="flex items-center justify-between mb-6 px-1">
+                        <div className="flex items-center gap-2">
+                            <img src="/logo-removebg.png" alt="Logo" className="w-6 h-6 object-contain" />
+                            {isSidebarOpen && (
+                                <span className="font-bold text-slate-900 tracking-tight text-lg">IndusVoiceLab</span>
+                            )}
                         </div>
                         {isSidebarOpen && (
-                            <div className="flex flex-col animate-fade-in">
-                                <span className="font-extrabold text-slate-900 leading-none tracking-tight text-lg">Indus AI</span>
-                                <span className="text-[10px] text-blue-600 font-bold uppercase tracking-widest mt-1">Voice Agent</span>
-                            </div>
+                            <button
+                                onClick={() => setIsSidebarOpen(false)}
+                                className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-200/50 rounded-md transition-all opacity-0 group-hover:opacity-100"
+                            >
+                                <Menu className="w-4 h-4" />
+                            </button>
                         )}
                     </div>
-                    {isSidebarOpen && (
-                        <button
-                            onClick={() => setIsSidebarOpen(false)}
-                            className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
-                        >
-                            <Menu className="w-5 h-5" />
-                        </button>
-                    )}
+
                     {!isSidebarOpen && (
                         <button
                             onClick={() => setIsSidebarOpen(true)}
-                            className="absolute -right-3 top-9 w-6 h-6 bg-white border border-slate-200 rounded-full flex items-center justify-center text-slate-400 hover:text-blue-600 shadow-sm z-30 transition-all hover:scale-110"
+                            className="absolute -right-3 top-7 w-6 h-6 bg-white border border-slate-200 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-900 shadow-sm z-30 transition-all hover:scale-110"
                         >
                             <Menu className="w-3 h-3" />
                         </button>
                     )}
+
+                    {/* Workspace Switcher Component */}
+                    <div className={`flex items-center justify-between p-2 rounded-xl bg-white border border-slate-200 shadow-sm transition-all duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0 h-0 p-0 overflow-hidden'}`}>
+                        <div className="flex items-center gap-2 overflow-hidden">
+                            <div className="w-6 h-6 rounded-md bg-orange-100 flex items-center justify-center shrink-0">
+                                <Volume2 className="w-3.5 h-3.5 text-orange-600" />
+                            </div>
+                            <span className="text-xs font-semibold text-slate-700 truncate">IndusVoiceLab</span>
+                        </div>
+                        <div className="flex flex-col gap-0.5 opacity-40">
+                            <div className="w-2 hs-[1px] bg-slate-900"></div>
+                            <div className="w-2 hs-[1px] bg-slate-900"></div>
+                        </div>
+                    </div>
                 </div>
 
-                {/* Sidebar Navigation - Modern Sectioned Layout */}
-                <nav className="flex-1 py-8 px-4 flex flex-col gap-8 overflow-y-auto overflow-x-hidden scrollbar-hide">
+                {/* Sidebar Navigation - ElevenLabs Style Navigation */}
+                <nav className="flex-1 px-3 py-4 flex flex-col gap-6 overflow-y-auto overflow-x-hidden scrollbar-hide">
 
-                    {/* General Section */}
-                    <div className="flex flex-col gap-2">
-                        {isSidebarOpen && <span className="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-2">Main Menu</span>}
+                    {/* Common Section */}
+                    <div className="flex flex-col gap-1">
                         <button
                             onClick={() => setViewMode('voice')}
-                            className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 group relative
-                            ${viewMode === 'voice' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}
+                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
+                            ${viewMode === 'voice' ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
                         `}
                         >
-                            <Home className={`w-5 h-5 shrink-0 ${viewMode === 'voice' ? 'text-white' : 'group-hover:scale-110 transition-transform'}`} />
-                            {isSidebarOpen && <span className="font-semibold text-sm">Voice Interface</span>}
-                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Voice Interface</span>}
+                            <Home className={`w-4 h-4 shrink-0 ${viewMode === 'voice' ? 'text-slate-950' : ''}`} />
+                            {isSidebarOpen && <span className="font-medium text-[13px]">Home</span>}
+                        </button>
+
+                        <button className="flex items-center gap-3 px-3 py-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200/30 rounded-lg transition-all group shrink-0">
+                            <Volume2 className="w-4 h-4 shrink-0" />
+                            {isSidebarOpen && <span className="font-medium text-[13px]">Voices</span>}
                         </button>
 
                         <button
-                            onClick={() => setViewMode('chat')}
-                            className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 group relative
-                            ${viewMode === 'chat' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}
-                        `}
-                        >
-                            <MessageSquare className={`w-5 h-5 shrink-0 ${viewMode === 'chat' ? 'text-white' : 'group-hover:scale-110 transition-transform'}`} />
-                            {isSidebarOpen && <span className="font-semibold text-sm">Text Messenger</span>}
-                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Text Messenger</span>}
+                            onClick={() => setViewMode('files')}
+                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
+                            ${viewMode === 'files' ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
+                        `}>
+                            <Settings className={`w-4 h-4 shrink-0 ${viewMode === 'files' ? 'text-slate-950' : ''}`} />
+                            {isSidebarOpen && <span className="font-medium text-[13px]">Files</span>}
                         </button>
                     </div>
 
-                    {/* Preferences Section */}
-                    <div className="flex flex-col gap-2">
-                        {isSidebarOpen && <span className="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-2">Configuration</span>}
-                        <button className="flex items-center gap-4 px-4 py-3 text-slate-500 hover:text-slate-900 hover:bg-slate-50 rounded-2xl transition-all group relative">
-                            <Volume2 className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
-                            {isSidebarOpen && <span className="font-medium text-sm">Audio Settings</span>}
-                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Audio Settings</span>}
+                    {/* Playground Section */}
+                    <div className="flex flex-col gap-1 pt-2">
+                        {isSidebarOpen && <span className="px-3 text-[11px] font-semibold text-slate-400/80 mb-1">Playground</span>}
+
+                        <button
+                            onClick={() => { setViewMode('chat'); setUseRag(false); }}
+                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
+                            ${viewMode === 'chat' && !useRag ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
+                        `}
+                        >
+                            <MessageSquare className={`w-4 h-4 shrink-0 ${viewMode === 'chat' && !useRag ? 'text-slate-950' : ''}`} />
+                            {isSidebarOpen && <span className="font-medium text-[13px]">Standard Chat</span>}
                         </button>
-                        <button className="flex items-center gap-4 px-4 py-3 text-slate-500 hover:text-slate-900 hover:bg-slate-50 rounded-2xl transition-all group relative">
-                            <Settings className="w-5 h-5 shrink-0 group-hover:scale-110 transition-transform" />
-                            {isSidebarOpen && <span className="font-medium text-sm">Global Settings</span>}
-                            {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all translate-x-1 group-hover:translate-x-0 font-medium">Global Settings</span>}
+
+                        <button
+                            onClick={() => { setViewMode('chat'); setUseRag(true); }}
+                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
+                            ${viewMode === 'chat' && useRag ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
+                        `}
+                        >
+                            <MessageSquare className={`w-4 h-4 shrink-0 ${viewMode === 'chat' && useRag ? 'text-slate-950' : ''}`} />
+                            {isSidebarOpen && <span className="font-medium text-[13px]">RAG Chat</span>}
+                        </button>
+                    </div>
+
+                    {/* Product Section */}
+                    <div className="flex flex-col gap-1 pt-2">
+                        {isSidebarOpen && <span className="px-3 text-[11px] font-semibold text-slate-400/80 mb-1">Products</span>}
+                        <button className="flex items-center justify-between px-3 py-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200/30 rounded-lg transition-all group shrink-0">
+                            <div className="flex items-center gap-3">
+                                <Settings className="w-4 h-4" />
+                                {isSidebarOpen && <span className="font-medium text-[13px]">Studio</span>}
+                            </div>
+                        </button>
+                        <button className="flex items-center justify-between px-3 py-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200/30 rounded-lg transition-all group shrink-0">
+                            <div className="flex items-center gap-3">
+                                <Volume2 className="w-4 h-4" />
+                                {isSidebarOpen && <span className="font-medium text-[13px]">Audiobooks</span>}
+                            </div>
+                            {isSidebarOpen && <span className="text-[9px] px-1.5 py-0.5 bg-slate-100 rounded text-slate-500 font-bold uppercase tracking-tighter">New</span>}
                         </button>
                     </div>
                 </nav>
 
-                {/* Sidebar Footer - Premium Logout */}
-                <div className="p-4 border-t border-slate-50 bg-slate-50/30 overflow-hidden">
+                {/* Sidebar Footer - Clean Logout */}
+                <div className="p-3 border-t border-slate-200/60 bg-white/50">
                     <button
                         onClick={() => {
                             disconnect();
                             onLogout();
                         }}
-                        className={`flex items-center gap-4 px-4 py-3 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-2xl transition-all w-full group relative
+                        className={`flex items-center gap-3 px-3 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50/50 rounded-lg transition-all w-full group relative
                         ${!isSidebarOpen && 'justify-center'}
                     `}
                     >
-                        <LogOut className="w-5 h-5 shrink-0 transition-transform group-hover:-translate-x-1" />
-                        {isSidebarOpen && <span className="font-bold text-sm">Terminate Session</span>}
-                        {!isSidebarOpen && <span className="absolute left-16 bg-red-600 text-white text-[11px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all font-bold">Sign Out</span>}
+                        <LogOut className="w-4 h-4 shrink-0 transition-transform group-hover:-translate-x-1" />
+                        {isSidebarOpen && <span className="font-medium text-[13px]">Sign Out</span>}
+                        {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[10px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all font-bold tracking-tight">Sign Out</span>}
                     </button>
                 </div>
             </aside>
@@ -652,10 +766,10 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                             </div>
                         </div>
                     </div>
-                ) : (
-                    <div className="flex-1 w-full max-w-4xl flex flex-col bg-white shadow-xl animate-fade-in">
+                ) : viewMode === 'chat' ? (
+                    <div className="flex-1 w-full max-w-5xl my-2 md:my-6 mx-2 md:mx-auto flex flex-col bg-white/80 backdrop-blur-2xl shadow-[0_8px_30px_rgb(0,0,0,0.06)] rounded-3xl animate-fade-in min-h-0 border border-white relative overflow-hidden">
                         {/* Chat Header */}
-                        <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between bg-white sticky top-0 z-20">
+                        <div className="px-6 py-5 border-b border-slate-200/40 flex items-center justify-between bg-white/40 backdrop-blur-xl sticky top-0 z-20">
                             <div className="flex items-center gap-4">
                                 <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white">
                                     <MessageSquare className="w-5 h-5" />
@@ -678,21 +792,27 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                         </div>
 
                         {/* Chat Messages */}
-                        <div className="flex-1 overflow-y-auto p-8 flex flex-col gap-6 scrollbar-hide">
+                        <div className="flex-1 overflow-y-auto p-6 md:p-8 flex flex-col gap-6 scrollbar-hide relative z-10">
                             {chatMessages.length === 0 && (
-                                <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-4 opacity-40">
-                                    <div className="w-16 h-16 rounded-3xl bg-slate-100 flex items-center justify-center">
-                                        <MessageSquare className="w-8 h-8 stroke-[1.5]" />
+                                <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-5 opacity-80 animate-fade-in-up">
+                                    <div className="relative">
+                                        <div className="absolute inset-0 bg-blue-400 blur-xl opacity-20 rounded-full"></div>
+                                        <div className="w-20 h-20 rounded-[2rem] bg-gradient-to-br from-white to-slate-50 flex items-center justify-center shadow-sm border border-slate-100 relative z-10">
+                                            <MessageSquare className="w-10 h-10 text-blue-500 stroke-[1.5]" />
+                                        </div>
                                     </div>
-                                    <p className="text-sm font-medium">No messages yet. Start a conversation!</p>
+                                    <div className="text-center">
+                                        <h3 className="text-slate-700 font-semibold text-base mb-1">Start a Conversation</h3>
+                                        <p className="text-sm font-medium text-slate-500">Ask the agent anything to begin.</p>
+                                    </div>
                                 </div>
                             )}
                             {chatMessages.map((msg, i) => (
-                                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[80%] px-5 py-3.5 rounded-2xl text-[14.5px] leading-relaxed shadow-sm
+                                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`} style={{ animationFillMode: 'both' }}>
+                                    <div className={`max-w-[85%] md:max-w-[75%] px-6 py-4 rounded-3xl text-[15px] leading-relaxed
                                         ${msg.role === 'user'
-                                            ? 'bg-blue-600 text-white rounded-br-none'
-                                            : 'bg-slate-50 text-slate-800 border border-slate-100 rounded-bl-none'}
+                                            ? 'bg-gradient-to-tr from-blue-600 to-blue-500 text-white shadow-md shadow-blue-500/20 rounded-br-sm'
+                                            : 'bg-white text-slate-800 shadow-[0_2px_10px_rgba(0,0,0,0.02)] border border-slate-100/60 rounded-bl-sm'}
                                     `}>
                                         {msg.content}
                                     </div>
@@ -711,29 +831,107 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                         </div>
 
                         {/* Chat Input Area */}
-                        <div className="p-8 bg-white border-t border-slate-100">
-                            <div className="relative max-w-3xl mx-auto flex items-center gap-4">
-                                <div className="flex-1 relative">
+                        <div className="p-4 md:p-6 bg-transparent relative z-10 w-full">
+                            <div className="relative max-w-4xl mx-auto flex flex-col gap-3">
+                                <div className="flex-1 relative group w-full">
+                                    <div className="absolute inset-0 bg-gradient-to-r from-blue-100 to-indigo-100 rounded-full blur-md opacity-0 group-focus-within:opacity-60 transition-opacity duration-500"></div>
                                     <input
                                         type="text"
                                         value={chatInput}
                                         onChange={(e) => setChatInput(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && sendChatMessage()}
                                         placeholder="Type your message..."
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 pr-14 text-[15px] focus:outline-none focus:ring-4 focus:ring-blue-500/5 focus:border-blue-500 transition-all focus:bg-white"
+                                        className="w-full bg-white/95 backdrop-blur-sm border border-slate-200/80 rounded-full px-8 py-4 pr-16 text-[15px] focus:outline-none focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 transition-all shadow-[0_2px_15px_rgba(0,0,0,0.03)] relative z-10"
                                     />
                                     <button
                                         onClick={sendChatMessage}
                                         disabled={!chatInput.trim() || isTyping}
-                                        className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center bg-blue-600 text-white rounded-full hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/30 disabled:bg-slate-100 disabled:text-slate-400 transition-all disabled:opacity-50 active:scale-95 z-20"
                                     >
-                                        <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24">
+                                        <svg className="w-5 h-5 fill-current ml-0.5" viewBox="0 0 24 24">
                                             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
                                         </svg>
                                     </button>
                                 </div>
+                                <p className="text-center text-[10px] text-slate-400/80 font-semibold uppercase tracking-widest">Powered by Ollama • Built by Indus Students</p>
                             </div>
-                            <p className="mt-4 text-center text-[11px] text-slate-400 font-medium uppercase tracking-widest">Powered by Ollama • Built by Indus Students</p>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex-1 w-full max-w-4xl my-auto mx-auto flex flex-col p-8 animate-fade-in">
+                        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 p-10 mt-10">
+                            <h2 className="text-2xl font-bold text-slate-800 mb-2">Knowledge Base</h2>
+                            <p className="text-slate-500 mb-8">Upload text or PDF files to inject custom context into the agent's long-term memory via Qdrant Vector DB.</p>
+
+                            <div className="border-2 border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 transition-colors rounded-2xl p-10 flex flex-col items-center justify-center cursor-pointer text-center relative">
+                                <input
+                                    type="file"
+                                    accept=".txt, .md, .pdf"
+                                    onChange={(e) => {
+                                        if (e.target.files && e.target.files[0]) {
+                                            setUploadFile(e.target.files[0]);
+                                            setUploadStatus(null);
+                                        }
+                                    }}
+                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                    title="Choose a file to upload"
+                                />
+                                <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-4 border border-blue-200">
+                                    <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                    </svg>
+                                </div>
+                                <h3 className="text-lg font-semibold text-slate-700">Drag & drop files here</h3>
+                                <p className="text-sm text-slate-400 mt-2">Supports .txt, .md, .pdf</p>
+                            </div>
+
+                            {uploadFile && (
+                                <div className="mt-6 flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                                    <span className="text-[15px] font-medium text-slate-700 truncate">{uploadFile.name}</span>
+                                    <button
+                                        onClick={handleUpload}
+                                        disabled={isUploading}
+                                        className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
+                                    >
+                                        {isUploading ? "Embedding..." : "Upload to Qdrant"}
+                                    </button>
+                                </div>
+                            )}
+
+                            {uploadStatus && (
+                                <div className={`mt-4 p-4 rounded-xl text-[14px] font-medium ${uploadStatus.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                                    {uploadStatus.message}
+                                </div>
+                            )}
+
+                            {/* Display Uploaded Files */}
+                            <div className="mt-12">
+                                <h3 className="text-xl font-bold text-slate-800 mb-4">Embedded Knowledge</h3>
+                                {uploadedFiles.length === 0 ? (
+                                    <p className="text-slate-500 text-sm">No documents embedded yet.</p>
+                                ) : (
+                                    <div className="flex flex-col gap-3">
+                                        {uploadedFiles.map((f, idx) => (
+                                            <div key={idx} className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-xl shadow-sm hover:shadow-md transition-shadow">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                                                        </svg>
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="text-[15px] font-semibold text-slate-800">{f.filename}</h4>
+                                                        <p className="text-xs text-slate-500">Embedded Chunks: {f.chunks}</p>
+                                                    </div>
+                                                </div>
+                                                <div className="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-[11px] font-bold tracking-wider uppercase">
+                                                    {f.uploaded_by}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 )}
