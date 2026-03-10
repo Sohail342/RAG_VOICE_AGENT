@@ -49,6 +49,12 @@ The agent orchestrates a sophisticated pipeline to ensure fluid interaction:
 -   Docker and Docker Compose installed.
 -   [Ollama](https://ollama.com/) running on the host machine (or as a container).
 
+#### 🔊 Voice Chat (TTS) Optional Setup
+To enable high-fidelity voice output, you should download the Piper ONNX models and place them in `app/llm/model/`:
+1.  Visit the [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main) repository.
+2.  Download the `.onnx` and `.onnx.json` files for your preferred voices (e.g., `en_US-amy-medium.onnx`).
+3.  Place these files in the `app/llm/model/` directory.
+
 ### Installation
 
 1.  **Clone the Repository**:

@@ -86,3 +86,25 @@ async def upload_file(
     except Exception as e:
         logger.error(f"Error processing file {file.filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
+
+
+@router.delete("/{filename}")
+async def delete_file(request: Request, filename: str):
+    """
+    Delete a file and its associated embeddings from the RAG system.
+    """
+    rag = getattr(request.app.state, "rag", None)
+    if not rag:
+        raise HTTPException(status_code=500, detail="RAG system is not initialized.")
+
+    try:
+        success = rag.delete_document(filename)
+        if success:
+            return {"status": "success", "message": f"Successfully deleted {filename}"}
+        else:
+            raise HTTPException(
+                status_code=404, detail=f"File '{filename}' not found or could not be deleted."
+            )
+    except Exception as e:
+        logger.error(f"Error deleting file {filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")

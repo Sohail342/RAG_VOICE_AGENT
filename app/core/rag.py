@@ -131,6 +131,20 @@ class ChromaRAG:
             logger.error(f"ChromaDB search failed: {e}")
             return ""
 
+    def delete_document(self, filename: str) -> bool:
+        """Deletes all chunks associated with the given filename from ChromaDB."""
+        if not self.collection:
+            return False
+
+        try:
+            # Delete all documents where 'filename' matches the provided name
+            self.collection.delete(where={"filename": filename})
+            logger.info(f"Deleted all embeddings for file: {filename}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete document '{filename}' from ChromaDB: {e}")
+            return False
+
     def get_uploaded_files(self) -> List[Dict[str, Any]]:
         """Returns a list of unique uploaded files from ChromaDB metadata."""
         if not self.collection:

@@ -112,7 +112,7 @@ class VoiceAgent:
             yield "Sorry, I had trouble thinking of a response."
 
     async def process_audio_stream(
-        self, audio_bytes: bytes, session_id: Optional[str] = None
+        self, audio_bytes: bytes, session_id: Optional[str] = None, tts_service=None
     ) -> AsyncGenerator[bytes, None]:
         """
         Main pipeline: Audio -> STT -> LLM Stream -> Sentence Buffer -> TTS -> Audio chunks
@@ -140,6 +140,7 @@ class VoiceAgent:
         sentence_stream = self.sentence_buffer.process_stream(llm_stream)
 
         # Generate audio sequentially per sentence and stream back to client
+        target_tts = tts_service or self.tts
         async for sentence in sentence_stream:
             if not sentence.strip():
                 continue
@@ -147,7 +148,7 @@ class VoiceAgent:
             logger.info(f"Agent generating TTS for: {sentence}")
             try:
                 # Get wav audio
-                audio_chunk = await self.tts.generate_audio(sentence)
+                audio_chunk = await target_tts.generate_audio(sentence)
                 yield audio_chunk
             except Exception as e:
                 logger.error(
@@ -155,7 +156,7 @@ class VoiceAgent:
                 )
 
     async def process_text_prompt(
-        self, prompt: str, session_id: Optional[str] = None
+        self, prompt: str, session_id: Optional[str] = None, tts_service=None
     ) -> AsyncGenerator[bytes, None]:
         """
         Processes a raw text prompt through the LLM -> TTS pipeline.
@@ -169,6 +170,7 @@ class VoiceAgent:
         sentence_stream = self.sentence_buffer.process_stream(llm_stream)
 
         # Generate audio sequentially per sentence and stream back to client
+        target_tts = tts_service or self.tts
         async for sentence in sentence_stream:
             if not sentence.strip():
                 continue
@@ -176,20 +178,21 @@ class VoiceAgent:
             logger.info(f"Agent generating TTS for: {sentence}")
             try:
                 # Get wav audio
-                audio_chunk = await self.tts.generate_audio(sentence)
+                audio_chunk = await target_tts.generate_audio(sentence)
                 yield audio_chunk
             except Exception as e:
                 logger.error(
                     f"Error generating audio for sentence '{sentence}': {e}", flush=True
                 )
 
-    async def generate_greeting(self, text: str) -> bytes:
+    async def generate_greeting(self, text: str, tts_service=None) -> bytes:
         """
         Directly generates TTS for a specific string (used for initial connection greeting).
         """
         logger.info(f"Agent generating Greeting TTS: {text}")
+        target_tts = tts_service or self.tts
         try:
-            audio_chunk = await self.tts.generate_audio(text)
+            audio_chunk = await target_tts.generate_audio(text)
             return audio_chunk
         except Exception as e:
             logger.error(f"Error generating greeting audio: {e}")

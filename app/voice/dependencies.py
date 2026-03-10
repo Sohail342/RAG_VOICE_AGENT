@@ -1,4 +1,5 @@
 import logging
+from typing import Dict, Optional
 
 from app.agent.agent import VoiceAgent
 from app.agent.rag_agent import RAGAgent
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Global dependencies
 _stt_service = None
-_tts_service = None
+_tts_services: Dict[str, TextToSpeech] = {}
 _voice_agent = None
 _rag_agent = None
 
@@ -37,30 +38,56 @@ def get_rag_agent() -> RAGAgent:
     return _rag_agent
 
 
+def get_tts_service(voice_id: str = "hfc") -> TextToSpeech:
+    """Dependency to retrieve a specific TTS service by voice_id."""
+    global _tts_services
+    service = _tts_services.get(voice_id)
+    if service is None:
+        # Fallback to hfc if requested id not found
+        service = _tts_services.get("hfc")
+    
+    if service is None:
+         raise RuntimeError(
+            f"TTS service '{voice_id}' is not initialized. Ensure init_voice_services was called."
+        )
+    return service
+
+
 def init_voice_services():
     """
     Initialize heavy models on startup.
     Ensure that model paths and binaries exist as needed.
     """
-    global _stt_service, _tts_service, _voice_agent, _rag_agent
+    global _stt_service, _tts_services, _voice_agent, _rag_agent
 
     logger.info("Initializing Voice Agent services...")
     # base.en is much faster and more accurate than tiny for English exclusively.
     _stt_service = SpeechToText(model_size="base.en", device="cpu", compute_type="int8")
 
-    try:
-        _tts_service = TextToSpeech(
-            model_path="app/llm/model/en_US-hfc_female-medium.onnx",
-            config_path="app/llm/model/en_US-hfc_female-medium.onnx.json",
-        )
-    except Exception as e:
-        logger.warning(
-            f"Failed to initialize TTS. (Did you download a Piper model to 'models/'?): {e}"
-        )
+    models_to_load = {
+        "amy": "app/llm/model/en_US-amy-medium.onnx",
+        "hfc": "app/llm/model/en_US-hfc_female-medium.onnx",
+        "kristin": "app/llm/model/en_US-kristin-medium.onnx",
+        "ljspeech": "app/llm/model/en_US-ljspeech-high.onnx",
+    }
+
+    for vid, mpath in models_to_load.items():
+        try:
+            _tts_services[vid] = TextToSpeech(
+                model_path=mpath,
+                config_path=f"{mpath}.json",
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to initialize TTS model '{vid}' at {mpath}: {e}"
+            )
+
+    # Initialize VoiceAgent with default 'hfc' voice for legacy/internal calls
+    default_tts = _tts_services.get("hfc")
 
     _voice_agent = VoiceAgent(
         stt_service=_stt_service,
-        tts_service=_tts_service,
+        tts_service=default_tts,
         sentence_buffer=SentenceBuffer(),
         ollama_url=f"{settings.OLLAMA_API_BASE_URL}/api/chat",
         ollama_model=settings.OLLAMA_MODEL,
@@ -68,7 +95,7 @@ def init_voice_services():
 
     _rag_agent = RAGAgent(
         stt_service=_stt_service,
-        tts_service=_tts_service,
+        tts_service=default_tts,
         sentence_buffer=SentenceBuffer(),
         ollama_url=f"{settings.OLLAMA_API_BASE_URL}/api/chat",
         ollama_model=settings.OLLAMA_MODEL,

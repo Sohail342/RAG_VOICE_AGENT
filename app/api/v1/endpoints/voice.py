@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from app.voice.dependencies import get_rag_agent, get_voice_agent
+from app.voice.dependencies import get_voice_agent, get_tts_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -14,7 +14,7 @@ router = APIRouter()
 async def voice_websocket_endpoint(
     websocket: WebSocket,
     session_id: Optional[str] = None,
-    use_rag: bool = False,
+    voice_id: str = "hfc",
 ):
     """
     WebSocket endpoint for real-time voice communication.
@@ -23,15 +23,18 @@ async def voice_websocket_endpoint(
     await websocket.accept()
 
     try:
-        agent = get_rag_agent() if use_rag else get_voice_agent()
+        agent = get_voice_agent()
+        tts_service = get_tts_service(voice_id)
 
         # Send initial greeting immediately via LLM
         greeting_prompt = "Introduce yourself as a Voice Agent built by Indus university Students. Ask the user how you can help them today. Keep it brief."
         async for greeting_audio in agent.process_text_prompt(
-            greeting_prompt, session_id=session_id
+            greeting_prompt, session_id=session_id, tts_service=tts_service
         ):
             if websocket.client_state == WebSocketState.CONNECTED:
                 await websocket.send_bytes(greeting_audio)
+        # Signal end of turn after greeting
+        await websocket.send_json({"type": "end_of_turn"})
     except RuntimeError as e:
         logger.error(str(e))
         await websocket.close(code=1011, reason="Voice Agent service unavailable")
@@ -52,7 +55,7 @@ async def voice_websocket_endpoint(
 
                 # The agent generator streams synthesized sentences one by one
                 async for response_audio in agent.process_audio_stream(
-                    audio_data, session_id=session_id
+                    audio_data, session_id=session_id, tts_service=tts_service
                 ):
                     if websocket.client_state == WebSocketState.CONNECTED:
                         # Send TTS audio back over websocket
@@ -60,6 +63,8 @@ async def voice_websocket_endpoint(
                         logger.info(
                             f"Sent TTS audio packet: {len(response_audio)} bytes"
                         )
+                # Signal end of turn after processing audio stream
+                await websocket.send_json({"type": "end_of_turn"})
             elif "text" in message:
                 text_data = message["text"]
                 if text_data == "TIMEOUT":
@@ -68,10 +73,12 @@ async def voice_websocket_endpoint(
                     )
                     prompt = "(The user has remained silent. Ask a very brief, friendly question to encourage them to speak or ask if they are still there.)"
                     async for response_audio in agent.process_text_prompt(
-                        prompt, session_id=session_id
+                        prompt, session_id=session_id, tts_service=tts_service
                     ):
                         if websocket.client_state == WebSocketState.CONNECTED:
                             await websocket.send_bytes(response_audio)
+                    # Signal end of turn after timeout prompt
+                    await websocket.send_json({"type": "end_of_turn"})
 
     except WebSocketDisconnect:
         logger.info("Voice WebSocket disconnected gracefully by the client.")

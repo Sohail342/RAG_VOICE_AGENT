@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { LogOut, MessageSquare, Settings, Menu, Home, Volume2, Phone } from 'lucide-react';
+import { LogOut, MessageSquare, Settings, Menu, Home, Volume2, Phone, Trash2, AlertTriangle, CheckCircle2, XCircle, FileText, CloudUpload, Search, File, AlertCircle } from 'lucide-react';
 
 interface VoiceAgentProps {
     onLogout: () => void;
@@ -16,6 +16,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     const [viewMode, setViewMode] = useState<'voice' | 'chat' | 'files'>('voice');
     const [useRag, setUseRag] = useState(true);
     const [isInitialConnecting, setIsInitialConnecting] = useState(false);
+    const [selectedVoice, setSelectedVoice] = useState("hfc"); // Default voice
 
     // Chat State
     const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
@@ -32,6 +33,17 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     const [isUploading, setIsUploading] = useState(false);
     const [uploadStatus, setUploadStatus] = useState<{ type: 'success' | 'error', message: string } | null>(null);
     const [uploadedFiles, setUploadedFiles] = useState<{ filename: string, chunks: number, uploaded_by: string }[]>([]);
+    const [searchQuery, setSearchQuery] = useState("");
+
+    // Modal & Toast State
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [fileToDelete, setFileToDelete] = useState<string | null>(null);
+    const [toast, setToast] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+
+    const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 3000);
+    };
 
     useEffect(() => {
         if (viewMode === 'files') {
@@ -69,8 +81,9 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
 
             if (res.ok) {
                 const data = await res.json();
-                setUploadStatus({ type: 'success', message: `${data.message} - embedded ${data.chunks_embedded} chunks.` });
+                showToast(`Successfully embedded ${data.chunks_embedded} chunks.`, 'success');
                 setUploadFile(null);
+                setUploadStatus(null);
 
                 // Refresh list
                 const t = localStorage.getItem('token');
@@ -79,12 +92,41 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                     .then(d => { if (d.status === 'success') setUploadedFiles(d.files); });
             } else {
                 const err = await res.json();
-                setUploadStatus({ type: 'error', message: err.detail || "Upload failed." });
+                showToast(err.detail || "Upload failed.", 'error');
             }
         } catch (error) {
-            setUploadStatus({ type: 'error', message: "Network error occurred." });
+            showToast("Network error occurred.", 'error');
         } finally {
             setIsUploading(false);
+        }
+    };
+
+    const handleDeleteFile = async (filename: string) => {
+        try {
+            const token = localStorage.getItem('token');
+            const res = await fetch(`/api/v1/files/${filename}`, {
+                method: "DELETE",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                }
+            });
+
+            if (res.ok) {
+                showToast(`Successfully deleted ${filename}`, 'success');
+                // Refresh list
+                const t = localStorage.getItem('token');
+                fetch('/api/v1/files', { headers: { 'Authorization': `Bearer ${t}` } })
+                    .then(r => r.json())
+                    .then(d => { if (d.status === 'success') setUploadedFiles(d.files); });
+            } else {
+                const err = await res.json();
+                showToast(err.detail || "Deletion failed.", 'error');
+            }
+        } catch (error) {
+            showToast("Network error occurred.", 'error');
+        } finally {
+            setIsDeleteModalOpen(false);
+            setFileToDelete(null);
         }
     };
 
@@ -114,6 +156,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     const doneSpeakingTimeoutRef = useRef<number | null>(null);
     const isPlayingRef = useRef<boolean>(false);
     const activeSourceRef = useRef<AudioBufferSourceNode | null>(null);
+    const isAgentGeneratingRef = useRef<boolean>(false);
 
     // SILENCE THRESHOLDS
     const SILENCE_THRESHOLD = 100; // Increased to ignore ambient room noise without AGC amplification
@@ -197,7 +240,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                 if (sessionStateRef.current === "SPEAKING") {
                     handleAgentFinishedSpeaking();
                 }
-            }, 800);
+            }, 500);
             return;
         }
 
@@ -278,7 +321,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
 
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const token = localStorage.getItem('token');
-            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice${token ? `?token=${token}&` : '?'}session_id=${sessionIdRef.current}&use_rag=${useRag}`;
+            const wsUrl = `${protocol}//${window.location.host}/api/v1/voice${token ? `?token=${token}&` : '?'}session_id=${sessionIdRef.current}&voice_id=${selectedVoice}`;
             const ws = new WebSocket(wsUrl);
             ws.binaryType = 'arraybuffer';
 
@@ -294,24 +337,44 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                     return;
                 }
 
-                if (isInitialConnecting) {
-                    setIsInitialConnecting(false);
-                }
-                setSessionState("SPEAKING");
-                setStatusText("Agent speaks...");
+                // Immediately clear any VAD timeout if we receive anything from agent
+                cleanupVADIntervals();
 
-                const arrayBuffer = event.data;
-                if (!audioContextRef.current) return;
-
-                try {
-                    const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
-                    audioQueueRef.current.push(audioBuffer);
-
-                    if (!isPlayingRef.current) {
-                        playNextInQueue();
+                if (event.data instanceof ArrayBuffer) {
+                    if (isInitialConnecting) {
+                        setIsInitialConnecting(false);
                     }
-                } catch (err) {
-                    console.error("Error decoding TTS audio:", err);
+                    setSessionState("SPEAKING");
+                    setStatusText("Agent speaks...");
+
+                    const arrayBuffer = event.data;
+                    if (!audioContextRef.current) return;
+
+                    try {
+                        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+                        audioQueueRef.current.push(audioBuffer);
+
+                        if (!isPlayingRef.current) {
+                            playNextInQueue();
+                        }
+                    } catch (err) {
+                        console.error("Error decoding TTS audio:", err);
+                    }
+                } else {
+                    // Handle JSON control messages
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === "end_of_turn") {
+                            console.log("Backend signaled end of turn.");
+                            isAgentGeneratingRef.current = false;
+                            // If audio queue is already empty, trigger finished handler
+                            if (!isPlayingRef.current && audioQueueRef.current.length === 0) {
+                                handleAgentFinishedSpeaking();
+                            }
+                        }
+                    } catch (e) {
+                        console.warn("Received unknown text message from backend:", event.data);
+                    }
                 }
             };
 
@@ -342,7 +405,12 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     };
 
     const handleAgentFinishedSpeaking = () => {
-        console.log("Agent finished speaking. Auto-restarting microphone for next turn.");
+        if (isAgentGeneratingRef.current) {
+            console.log("Agent finished current audio segment, but backend is still generating sentences...");
+            return;
+        }
+
+        console.log("Agent finished turn. Auto-restarting microphone for next turn.");
         setTimeout(() => {
             if (sessionStateRef.current !== "INACTIVE") {
                 startListeningTurn();
@@ -477,6 +545,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
 
                     setSessionState("THINKING");
                     setStatusText("Agent thinking...");
+                    isAgentGeneratingRef.current = true;
                 } else {
                     setSessionState("INACTIVE");
                     setStatusText("Connection lost.");
@@ -528,6 +597,7 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                 setViewMode('voice'); // Ensure we are in voice view when calling
                 // Triggers WebSocket open -> `voice.py` sends `generate_greeting` LLM payload -> we get `SPEAKING`.
                 setIsInitialConnecting(true);
+                isAgentGeneratingRef.current = true;
                 await connectAndWaitForSocket();
             } catch (err) {
                 console.error("Microphone access error:", err);
@@ -542,23 +612,31 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
     return (
         <div className="h-screen flex bg-[#f4f4f4] relative overflow-hidden font-sans">
 
-            {/* Collapsible Sidebar */}
+            {/* Sidebar */}
             <aside
-                className={`relative z-20 flex flex-col bg-[#f9f9fb] border-r border-slate-200/60 transition-all duration-500 ease-in-out shadow-[4px_0_24px_rgba(0,0,0,0.02)] overflow-x-hidden ${isSidebarOpen ? 'w-72' : 'w-20'}`}
+                className={`relative z-30 flex flex-col bg-[#f8f9fc] border-r border-slate-200/60 transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] shadow-[4px_0_24px_rgba(0,0,0,0.02)] overflow-x-hidden ${isSidebarOpen ? 'w-72' : 'w-22'}`}
             >
-                {/* Sidebar Header - ElevenLabs Style Branding */}
-                <div className="pt-6 px-4 pb-2 relative group">
-                    <div className="flex items-center justify-between mb-6 px-1">
-                        <div className="flex items-center gap-2">
-                            <img src="/logo-removebg.png" alt="Logo" className="w-6 h-6 object-contain" />
+                {/* Branding Header */}
+                <div className="pt-8 px-5 pb-6">
+                    <div className="flex items-center justify-between mb-8">
+                        <div className="flex items-center gap-3 group cursor-pointer">
+                            <div className="relative">
+                                <div className="absolute inset-0 bg-indigo-500 blur-md opacity-20 group-hover:opacity-40 transition-opacity rounded-full"></div>
+                                <div className="relative w-9 h-9 bg-white rounded-xl shadow-sm border border-slate-100 flex items-center justify-center overflow-hidden">
+                                    <img src="/logo-removebg.png" alt="Logo" className="w-6 h-6 object-contain group-hover:scale-110 transition-transform duration-500" />
+                                </div>
+                            </div>
                             {isSidebarOpen && (
-                                <span className="font-bold text-slate-900 tracking-tight text-lg">IndusVoiceLab</span>
+                                <div className="flex flex-col animate-fade-in">
+                                    <span className="font-black text-slate-900 leading-none tracking-tighter text-lg uppercase">Indus</span>
+                                    <span className="font-bold text-indigo-500/80 text-[10px] leading-none uppercase tracking-[0.2em] mt-0.5">Voice Lab</span>
+                                </div>
                             )}
                         </div>
                         {isSidebarOpen && (
                             <button
                                 onClick={() => setIsSidebarOpen(false)}
-                                className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-200/50 rounded-md transition-all opacity-0 group-hover:opacity-100"
+                                className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-slate-900 hover:bg-slate-200/50 rounded-lg transition-all"
                             >
                                 <Menu className="w-4 h-4" />
                             </button>
@@ -566,118 +644,162 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                     </div>
 
                     {!isSidebarOpen && (
-                        <button
-                            onClick={() => setIsSidebarOpen(true)}
-                            className="absolute -right-3 top-7 w-6 h-6 bg-white border border-slate-200 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-900 shadow-sm z-30 transition-all hover:scale-110"
-                        >
-                            <Menu className="w-3 h-3" />
-                        </button>
+                        <div className="flex flex-col items-center">
+                            <button
+                                onClick={() => setIsSidebarOpen(true)}
+                                className="w-10 h-10 flex items-center justify-center bg-white border border-slate-200 text-slate-400 hover:text-indigo-600 rounded-xl shadow-sm transition-all hover:scale-105 active:scale-95 mb-4"
+                            >
+                                <Menu className="w-4 h-4" />
+                            </button>
+                        </div>
                     )}
-
-                    {/* Workspace Switcher Component */}
-                    <div className={`flex items-center justify-between p-2 rounded-xl bg-white border border-slate-200 shadow-sm transition-all duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0 h-0 p-0 overflow-hidden'}`}>
-                        <div className="flex items-center gap-2 overflow-hidden">
-                            <div className="w-6 h-6 rounded-md bg-orange-100 flex items-center justify-center shrink-0">
-                                <Volume2 className="w-3.5 h-3.5 text-orange-600" />
-                            </div>
-                            <span className="text-xs font-semibold text-slate-700 truncate">IndusVoiceLab</span>
-                        </div>
-                        <div className="flex flex-col gap-0.5 opacity-40">
-                            <div className="w-2 hs-[1px] bg-slate-900"></div>
-                            <div className="w-2 hs-[1px] bg-slate-900"></div>
-                        </div>
-                    </div>
                 </div>
 
-                {/* Sidebar Navigation - ElevenLabs Style Navigation */}
-                <nav className="flex-1 px-3 py-4 flex flex-col gap-6 overflow-y-auto overflow-x-hidden scrollbar-hide">
+                {/* Navigation Scroll Area */}
+                <nav className="flex-1 px-4 flex flex-col gap-8 overflow-y-auto scrollbar-hide py-2">
+                    {/* Main Section */}
+                    <div className="flex flex-col gap-1.5">
+                        {isSidebarOpen && <span className="px-3 text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Core System</span>}
 
-                    {/* Common Section */}
-                    <div className="flex flex-col gap-1">
                         <button
                             onClick={() => setViewMode('voice')}
-                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
-                            ${viewMode === 'voice' ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
-                        `}
+                            className={`w-full group relative flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-300 ${viewMode === 'voice'
+                                ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/50'
+                                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'
+                                }`}
                         >
-                            <Home className={`w-4 h-4 shrink-0 ${viewMode === 'voice' ? 'text-slate-950' : ''}`} />
-                            {isSidebarOpen && <span className="font-medium text-[13px]">Home</span>}
+                            {viewMode === 'voice' && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-600 rounded-r-full animate-fade-in" />}
+                            <Home className={`w-4.5 h-4.5 shrink-0 transition-transform duration-300 group-hover:scale-110 ${viewMode === 'voice' ? 'text-indigo-600' : 'text-slate-400'}`} />
+                            {isSidebarOpen && <span className="font-bold text-[13px] tracking-tight">Dashboard</span>}
                         </button>
 
-                        <button className="flex items-center gap-3 px-3 py-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200/30 rounded-lg transition-all group shrink-0">
-                            <Volume2 className="w-4 h-4 shrink-0" />
-                            {isSidebarOpen && <span className="font-medium text-[13px]">Voices</span>}
-                        </button>
+                        <div className="flex flex-col gap-1">
+                            <button
+                                onClick={() => setViewMode('voice')}
+                                className={`w-full group relative flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-300 ${viewMode === 'voice' && selectedVoice
+                                    ? 'text-indigo-600'
+                                    : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'
+                                    }`}
+                            >
+                                <Volume2 className={`w-4.5 h-4.5 shrink-0 ${viewMode === 'voice' ? 'text-indigo-600' : 'text-slate-400'}`} />
+                                {isSidebarOpen && <span className="font-bold text-[13px] tracking-tight">Voice Profiles</span>}
+                            </button>
+
+                            {isSidebarOpen && (
+                                <div className="pl-10 pr-2 flex flex-col gap-1 animate-fade-in">
+                                    {[
+                                        { id: 'hfc', name: 'Elite Female', type: 'Premium' },
+                                        { id: 'amy', name: 'Amy Neural', type: 'Fast' },
+                                        { id: 'kristin', name: 'Kristin HD', type: 'Neural' },
+                                        { id: 'ljspeech', name: 'LJ Speech', type: 'Studio' }
+                                    ].map(voice => (
+                                        <button
+                                            key={voice.id}
+                                            onClick={() => setSelectedVoice(voice.id)}
+                                            className={`group/item flex items-center justify-between px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all ${selectedVoice === voice.id
+                                                ? 'bg-indigo-50 text-indigo-700'
+                                                : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+                                                }`}
+                                        >
+                                            <span>{voice.name}</span>
+                                            {selectedVoice === voice.id && <div className="w-1 h-1 rounded-full bg-indigo-600 shadow-sm shadow-indigo-300"></div>}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
 
                         <button
                             onClick={() => setViewMode('files')}
-                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
-                            ${viewMode === 'files' ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
-                        `}>
-                            <Settings className={`w-4 h-4 shrink-0 ${viewMode === 'files' ? 'text-slate-950' : ''}`} />
-                            {isSidebarOpen && <span className="font-medium text-[13px]">Files</span>}
+                            className={`w-full group relative flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-300 ${viewMode === 'files'
+                                ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/50'
+                                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'
+                                }`}
+                        >
+                            {viewMode === 'files' && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-600 rounded-r-full animate-fade-in" />}
+                            <FileText className={`w-4.5 h-4.5 shrink-0 transition-transform duration-300 group-hover:scale-110 ${viewMode === 'files' ? 'text-indigo-600' : 'text-slate-400'}`} />
+                            {isSidebarOpen && (
+                                <div className="flex flex-1 items-center justify-between">
+                                    <span className="font-bold text-[13px] tracking-tight">Knowledge Base</span>
+                                    <span className="text-[9px] font-black bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded-md uppercase tracking-tighter">{uploadedFiles.length}</span>
+                                </div>
+                            )}
                         </button>
                     </div>
 
-                    {/* Playground Section */}
-                    <div className="flex flex-col gap-1 pt-2">
-                        {isSidebarOpen && <span className="px-3 text-[11px] font-semibold text-slate-400/80 mb-1">Playground</span>}
+                    {/* AI Lab Section */}
+                    <div className="flex flex-col gap-1.5">
+                        {isSidebarOpen && <span className="px-3 text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 text-indigo-500/80">AI Interaction Lab</span>}
 
                         <button
                             onClick={() => { setViewMode('chat'); setUseRag(false); }}
-                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
-                            ${viewMode === 'chat' && !useRag ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
-                        `}
+                            className={`w-full group relative flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-300 ${viewMode === 'chat' && !useRag
+                                ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/50'
+                                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'
+                                }`}
                         >
-                            <MessageSquare className={`w-4 h-4 shrink-0 ${viewMode === 'chat' && !useRag ? 'text-slate-950' : ''}`} />
-                            {isSidebarOpen && <span className="font-medium text-[13px]">Standard Chat</span>}
+                            {viewMode === 'chat' && !useRag && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-600 rounded-r-full animate-fade-in" />}
+                            <MessageSquare className={`w-4.5 h-4.5 shrink-0 transition-transform duration-300 group-hover:scale-110 ${viewMode === 'chat' && !useRag ? 'text-indigo-600' : 'text-slate-400'}`} />
+                            {isSidebarOpen && <span className="font-bold text-[13px] tracking-tight">Direct Neural Reasoning</span>}
                         </button>
 
                         <button
                             onClick={() => { setViewMode('chat'); setUseRag(true); }}
-                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative
-                            ${viewMode === 'chat' && useRag ? 'bg-white text-slate-900 shadow-sm border border-slate-200/50' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/30'}
-                        `}
+                            className={`w-full group relative flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-300 ${viewMode === 'chat' && useRag
+                                ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/50'
+                                : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'
+                                }`}
                         >
-                            <MessageSquare className={`w-4 h-4 shrink-0 ${viewMode === 'chat' && useRag ? 'text-slate-950' : ''}`} />
-                            {isSidebarOpen && <span className="font-medium text-[13px]">RAG Chat</span>}
-                        </button>
-                    </div>
-
-                    {/* Product Section */}
-                    <div className="flex flex-col gap-1 pt-2">
-                        {isSidebarOpen && <span className="px-3 text-[11px] font-semibold text-slate-400/80 mb-1">Products</span>}
-                        <button className="flex items-center justify-between px-3 py-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200/30 rounded-lg transition-all group shrink-0">
-                            <div className="flex items-center gap-3">
-                                <Settings className="w-4 h-4" />
-                                {isSidebarOpen && <span className="font-medium text-[13px]">Studio</span>}
+                            {viewMode === 'chat' && useRag && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-600 rounded-r-full animate-fade-in" />}
+                            <div className="relative">
+                                <MessageSquare className={`w-4.5 h-4.5 shrink-0 transition-transform duration-300 group-hover:scale-110 ${viewMode === 'chat' && useRag ? 'text-indigo-600' : 'text-slate-400'}`} />
+                                <div className="absolute -top-1 -right-1 w-2 h-2 bg-indigo-500 rounded-full border-2 border-white"></div>
                             </div>
-                        </button>
-                        <button className="flex items-center justify-between px-3 py-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200/30 rounded-lg transition-all group shrink-0">
-                            <div className="flex items-center gap-3">
-                                <Volume2 className="w-4 h-4" />
-                                {isSidebarOpen && <span className="font-medium text-[13px]">Audiobooks</span>}
-                            </div>
-                            {isSidebarOpen && <span className="text-[9px] px-1.5 py-0.5 bg-slate-100 rounded text-slate-500 font-bold uppercase tracking-tighter">New</span>}
+                            {isSidebarOpen && (
+                                <div className="flex flex-1 items-center justify-between">
+                                    <span className="font-bold text-[13px] tracking-tight">RAG Context Engine</span>
+                                    <div className="px-1.5 py-0.5 bg-indigo-600 text-[8px] text-white rounded-md font-black uppercase tracking-widest">Active</div>
+                                </div>
+                            )}
                         </button>
                     </div>
                 </nav>
 
-                {/* Sidebar Footer - Clean Logout */}
-                <div className="p-3 border-t border-slate-200/60 bg-white/50">
-                    <button
-                        onClick={() => {
-                            disconnect();
-                            onLogout();
-                        }}
-                        className={`flex items-center gap-3 px-3 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50/50 rounded-lg transition-all w-full group relative
-                        ${!isSidebarOpen && 'justify-center'}
-                    `}
-                    >
-                        <LogOut className="w-4 h-4 shrink-0 transition-transform group-hover:-translate-x-1" />
-                        {isSidebarOpen && <span className="font-medium text-[13px]">Sign Out</span>}
-                        {!isSidebarOpen && <span className="absolute left-16 bg-slate-900 text-white text-[10px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap z-50 transition-all font-bold tracking-tight">Sign Out</span>}
-                    </button>
+                {/* Sidebar Footer */}
+                <div className="p-4 mt-auto">
+                    {isSidebarOpen ? (
+                        <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-sm mb-4 animate-fade-in-down">
+                            <div className="flex items-center gap-3 mb-3">
+                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 p-[1px]">
+                                    <div className="w-full h-full rounded-xl bg-white flex items-center justify-center text-[14px] font-black text-indigo-600 uppercase tracking-tighter">IU</div>
+                                </div>
+                                <div className="flex flex-col overflow-hidden">
+                                    <span className="font-bold text-slate-900 text-[13px] truncate tracking-tight">Indus University Admin</span>
+                                    <div className="flex items-center gap-1.5">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-sm shadow-green-200 animate-pulse"></div>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Neural Core Online</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => { disconnect(); onLogout(); }}
+                                className="w-full group flex items-center justify-center gap-2 py-2 bg-slate-50 hover:bg-red-50 text-slate-500 hover:text-red-500 rounded-xl transition-all duration-300 border border-slate-100 hover:border-red-100 font-bold text-[12px]"
+                            >
+                                <LogOut className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
+                                Sign Out
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="flex flex-col items-center gap-4">
+                            <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center text-[12px] font-black text-indigo-600 border border-indigo-100 shadow-sm">IU</div>
+                            <button
+                                onClick={() => { disconnect(); onLogout(); }}
+                                className="w-10 h-10 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                            >
+                                <LogOut className="w-4 h-4" />
+                            </button>
+                        </div>
+                    )}
                 </div>
             </aside>
 
@@ -866,84 +988,213 @@ export default function VoiceAgent({ onLogout }: VoiceAgentProps) {
                         </div>
                     </div>
                 ) : (
-                    <div className="flex-1 w-full max-w-4xl my-auto mx-auto flex flex-col p-8 animate-fade-in">
-                        <div className="bg-white rounded-3xl shadow-xl border border-slate-100 p-10 mt-10">
-                            <h2 className="text-2xl font-bold text-slate-800 mb-2">Knowledge Base</h2>
-                            <p className="text-slate-500 mb-8">Upload text or PDF files to inject custom context into the agent's long-term memory via Qdrant Vector DB.</p>
-
-                            <div className="border-2 border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 transition-colors rounded-2xl p-10 flex flex-col items-center justify-center cursor-pointer text-center relative">
+                    <div className="flex-1 w-full max-w-5xl mx-auto flex flex-col p-6 md:p-10 animate-fade-in overflow-y-auto scrollbar-hide">
+                        {/* Header Section */}
+                        <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-10 mt-6">
+                            <div>
+                                <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight mb-2">Knowledge Base</h2>
+                                <p className="text-slate-500 text-[15px] font-medium max-w-lg">
+                                    Manage your custom documentation. Upload files to give the agent long-term memory and specific domain knowledge.
+                                </p>
+                            </div>
+                            <div className="relative group w-full md:w-72">
+                                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-500 transition-colors" />
                                 <input
-                                    type="file"
-                                    accept=".txt, .md, .pdf"
-                                    onChange={(e) => {
-                                        if (e.target.files && e.target.files[0]) {
-                                            setUploadFile(e.target.files[0]);
-                                            setUploadStatus(null);
-                                        }
-                                    }}
-                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                    title="Choose a file to upload"
+                                    type="text"
+                                    placeholder="Search documents..."
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    className="w-full bg-white border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-[14px] focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500/30 transition-all shadow-sm"
                                 />
-                                <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-4 border border-blue-200">
-                                    <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                                    </svg>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
+                            {/* Upload Section */}
+                            <div className="lg:col-span-5 flex flex-col gap-6">
+                                <div className="bg-white rounded-3xl p-8 border border-slate-100 shadow-xl shadow-slate-200/40 relative overflow-hidden group">
+                                    <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-indigo-500 to-purple-500"></div>
+                                    <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
+                                        <CloudUpload className="w-5 h-5 text-indigo-500" />
+                                        Upload New File
+                                    </h3>
+
+                                    <div className="border-2 border-dashed border-slate-200 bg-slate-50/50 hover:bg-white hover:border-indigo-400/50 hover:shadow-inner transition-all rounded-2xl p-8 flex flex-col items-center justify-center cursor-pointer text-center relative mb-6 min-h-[180px]">
+                                        <input
+                                            type="file"
+                                            accept=".txt, .md, .pdf"
+                                            onChange={(e) => {
+                                                if (e.target.files && e.target.files[0]) {
+                                                    setUploadFile(e.target.files[0]);
+                                                    setUploadStatus(null);
+                                                }
+                                            }}
+                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                        />
+                                        <div className="w-14 h-14 bg-indigo-50 rounded-2xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-300">
+                                            <FileText className="w-7 h-7 text-indigo-500" />
+                                        </div>
+                                        <h4 className="text-[15px] font-bold text-slate-700">Select Document</h4>
+                                        <p className="text-xs text-slate-400 mt-2 font-medium">Supports PDF, TXT, or MD files</p>
+                                    </div>
+
+                                    {uploadFile && (
+                                        <div className="flex flex-col gap-4 animate-fade-in">
+                                            <div className="flex items-center gap-3 p-3.5 bg-indigo-50/50 border border-indigo-100 rounded-xl">
+                                                <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm">
+                                                    <File className="w-4 h-4 text-indigo-500" />
+                                                </div>
+                                                <span className="text-[14px] font-semibold text-slate-700 truncate flex-1">{uploadFile.name}</span>
+                                                <button onClick={() => setUploadFile(null)} className="text-slate-400 hover:text-red-500 transition-colors">
+                                                    <XCircle className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                            <button
+                                                onClick={handleUpload}
+                                                disabled={isUploading}
+                                                className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-indigo-200 disabled:opacity-50 active:scale-95 flex items-center justify-center gap-2"
+                                            >
+                                                {isUploading ? (
+                                                    <>
+                                                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                                                        Processing...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <CheckCircle2 className="w-4 h-4" />
+                                                        Confirm & Embed
+                                                    </>
+                                                )}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {uploadStatus && !isUploading && (
+                                        <div className={`mt-4 p-4 rounded-xl text-[13px] font-bold flex items-center gap-2 animate-fade-in ${uploadStatus.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                                            {uploadStatus.type === 'success' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+                                            {uploadStatus.message}
+                                        </div>
+                                    )}
                                 </div>
-                                <h3 className="text-lg font-semibold text-slate-700">Drag & drop files here</h3>
-                                <p className="text-sm text-slate-400 mt-2">Supports .txt, .md, .pdf</p>
+
+                                <div className="bg-indigo-900 border border-indigo-800 rounded-3xl p-6 text-white overflow-hidden relative">
+                                    <div className="absolute top-[-20%] right-[-10%] w-40 h-40 bg-indigo-500/20 rounded-full blur-3xl"></div>
+                                    <h4 className="text-[13px] font-bold text-indigo-300 uppercase letter-tracking-wider mb-2">ChromaDB Stats</h4>
+                                    <div className="flex items-end gap-3">
+                                        <span className="text-4xl font-extrabold tracking-tight">{uploadedFiles.length}</span>
+                                        <span className="text-[14px] font-medium text-indigo-200 mb-1.5 px-2">Total Verified Documents</span>
+                                    </div>
+                                </div>
                             </div>
 
-                            {uploadFile && (
-                                <div className="mt-6 flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-xl">
-                                    <span className="text-[15px] font-medium text-slate-700 truncate">{uploadFile.name}</span>
-                                    <button
-                                        onClick={handleUpload}
-                                        disabled={isUploading}
-                                        className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
-                                    >
-                                        {isUploading ? "Embedding..." : "Upload to Qdrant"}
-                                    </button>
-                                </div>
-                            )}
+                            {/* Files List Section */}
+                            <div className="lg:col-span-7">
+                                <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
+                                    <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                                    Embedded Knowledge
+                                </h3>
 
-                            {uploadStatus && (
-                                <div className={`mt-4 p-4 rounded-xl text-[14px] font-medium ${uploadStatus.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-                                    {uploadStatus.message}
-                                </div>
-                            )}
-
-                            {/* Display Uploaded Files */}
-                            <div className="mt-12">
-                                <h3 className="text-xl font-bold text-slate-800 mb-4">Embedded Knowledge</h3>
                                 {uploadedFiles.length === 0 ? (
-                                    <p className="text-slate-500 text-sm">No documents embedded yet.</p>
+                                    <div className="bg-white border-2 border-dashed border-slate-200 rounded-3xl p-16 flex flex-col items-center justify-center text-center">
+                                        <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-6">
+                                            <FileText className="w-10 h-10 text-slate-300" />
+                                        </div>
+                                        <h4 className="text-lg font-bold text-slate-800">No documents found</h4>
+                                        <p className="text-slate-400 text-[14px] mt-2 max-w-xs">Upload your first document to start training the agent's context.</p>
+                                    </div>
                                 ) : (
-                                    <div className="flex flex-col gap-3">
-                                        {uploadedFiles.map((f, idx) => (
-                                            <div key={idx} className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-xl shadow-sm hover:shadow-md transition-shadow">
-                                                <div className="flex items-center gap-4">
-                                                    <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">
-                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                                                        </svg>
+                                    <div className="flex flex-col gap-3.5">
+                                        {uploadedFiles
+                                            .filter(f => f.filename.toLowerCase().includes(searchQuery.toLowerCase()))
+                                            .map((f, idx) => (
+                                                <div key={idx} className="group bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md hover:border-indigo-100 p-4 transition-all duration-300 flex items-center justify-between">
+                                                    <div className="flex items-center gap-4 overflow-hidden">
+                                                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 transition-colors ${f.filename.endsWith('.pdf') ? 'bg-red-50 text-red-500 group-hover:bg-red-100' : 'bg-blue-50 text-blue-500 group-hover:bg-blue-100'
+                                                            }`}>
+                                                            {f.filename.endsWith('.pdf') ? <FileText className="w-6 h-6" /> : <File className="w-6 h-6" />}
+                                                        </div>
+                                                        <div className="overflow-hidden">
+                                                            <h4 className="text-[15px] font-bold text-slate-800 truncate pr-4">{f.filename}</h4>
+                                                            <div className="flex items-center gap-3 mt-1">
+                                                                <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-md">
+                                                                    <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></div>
+                                                                    <span className="text-[11px] font-bold text-slate-600 uppercase">{f.chunks} Chunks</span>
+                                                                </div>
+                                                                <span className="text-[12px] text-slate-400 font-medium">By {f.uploaded_by}</span>
+                                                            </div>
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <h4 className="text-[15px] font-semibold text-slate-800">{f.filename}</h4>
-                                                        <p className="text-xs text-slate-500">Embedded Chunks: {f.chunks}</p>
+
+                                                    <div className="flex items-center gap-2">
+                                                        <button
+                                                            onClick={() => { setFileToDelete(f.filename); setIsDeleteModalOpen(true); }}
+                                                            className="w-10 h-10 flex items-center justify-center text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                                                            title="Remove from memory"
+                                                        >
+                                                            <Trash2 className="w-4.5 h-4.5" />
+                                                        </button>
                                                     </div>
                                                 </div>
-                                                <div className="px-3 py-1 bg-slate-100 text-slate-600 rounded-full text-[11px] font-bold tracking-wider uppercase">
-                                                    {f.uploaded_by}
-                                                </div>
-                                            </div>
-                                        ))}
+                                            ))}
                                     </div>
                                 )}
                             </div>
                         </div>
                     </div>
-                )}
-            </main>
-        </div>
+                )
+                }
+            </main >
+
+            {/* Delete Confirmation Modal */}
+            {
+                isDeleteModalOpen && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+                        <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-scale-in">
+                            <div className="p-8 flex flex-col items-center text-center">
+                                <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center text-red-500 mb-4 border border-red-100">
+                                    <AlertTriangle className="w-8 h-8" />
+                                </div>
+                                <h3 className="text-xl font-bold text-slate-900 mb-2">Delete Knowledge?</h3>
+                                <p className="text-slate-500 text-[15px] leading-relaxed mb-6">
+                                    This will permanently remove <span className="font-semibold text-slate-800">"{fileToDelete}"</span> and all its embedded context from the agent's memory. This action cannot be undone.
+                                </p>
+                                <div className="flex flex-col sm:flex-row gap-3 w-full">
+                                    <button
+                                        onClick={() => { setIsDeleteModalOpen(false); setFileToDelete(null); }}
+                                        className="flex-1 px-6 py-2.5 border border-slate-200 text-slate-600 font-semibold rounded-xl hover:bg-slate-50 hover:text-slate-900 transition-all text-[14px]"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={() => fileToDelete && handleDeleteFile(fileToDelete)}
+                                        className="flex-1 px-6 py-2.5 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 shadow-lg shadow-red-200/50 transition-all active:scale-95 text-[14px]"
+                                    >
+                                        Delete Forever
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
+            {/* Toast Notification */}
+            {
+                toast && (
+                    <div className={`fixed bottom-8 right-8 z-[110] flex items-center gap-3 px-6 py-4 rounded-2xl shadow-xl border animate-slide-up-fade-in ${toast.type === 'success' ? 'bg-white border-green-100 text-slate-800' : 'bg-red-50 border-red-100 text-red-800'
+                        }`}>
+                        {toast.type === 'success' ? (
+                            <CheckCircle2 className="w-5 h-5 text-green-500" />
+                        ) : (
+                            <AlertCircle className="w-5 h-5 text-red-500" />
+                        )}
+                        <span className="text-sm font-semibold">{toast.message}</span>
+                        <button onClick={() => setToast(null)} className="ml-2 text-slate-400 hover:text-slate-600">
+                            <XCircle className="w-4 h-4" />
+                        </button>
+                    </div>
+                )
+            }
+        </div >
     );
 }
